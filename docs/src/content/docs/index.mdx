@@ -7,14 +7,15 @@ hero:
     Expose typed web-app actions to MCP-compatible AI agents over WebSocket.
     No browser automation, no scraping, no Playwright.
   image:
-    file: ../../assets/logo-light.svg
+    light: ../../assets/tesseron-hex.svg
+    dark: ../../assets/tesseron-hex-dark.svg
   actions:
     - text: Quickstart (5 min)
-      link: /overview/quickstart/
+      link: ./overview/quickstart/
       icon: right-arrow
       variant: primary
     - text: Protocol spec
-      link: /protocol/
+      link: ./protocol/
       variant: secondary
     - text: GitHub
       link: https://github.com/BrainBlend-AI/tesseron
@@ -65,12 +66,12 @@ import Diagram from '../../components/Diagram.astro';
 <CardGrid>
   <LinkCard
     title="Protocol"
-    href="/protocol/"
+    href="./protocol/"
     description="The wire format, handshake, action model, and advanced MCP features - with a diagram for every flow."
   />
   <LinkCard
     title="SDK"
-    href="/sdk/"
+    href="./sdk/"
     description="Build with @tesseron/web, /server, /react, or port Tesseron to a new language."
   />
 </CardGrid>

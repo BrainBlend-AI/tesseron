@@ -5,7 +5,7 @@
      role="img"
      aria-label="Tesseron">
   <title>Tesseron</title>
-  <desc>Dark-background variant. Warm light-stone tiles around a brighter amber core. Gaps between tiles are genuine transparent space so the mark reads on any dark surface.</desc>
+  <desc>Rotated hex pinwheel — six dark tiles around an amber core. Gaps between tiles are genuine transparent space so the mark reads on any background.</desc>
 
   <!--
     Rotation + per-tile scale.
@@ -14,7 +14,7 @@
     without relying on background-coloured strokes.
   -->
   <g transform="rotate(90 128 128) translate(128 128) scale(1.37) translate(-128 -128)">
-    <g fill="#e7e5e4">
+    <g fill="#1b1f27">
       <path d="M176 128L152 86.43L176 44.86L224 128Z"
             transform="translate(182 96.82) scale(0.94) translate(-182 -96.82)"/>
       <path d="M152 86.43L104 86.43L80 44.86L176 44.86Z"
@@ -29,7 +29,7 @@
             transform="translate(182 159.18) scale(0.94) translate(-182 -159.18)"/>
     </g>
     <path d="M176 128L152 86.43L104 86.43L80 128L104 169.57L152 169.57Z"
-          fill="#f59e0b"
+          fill="#b45309"
           transform="translate(128 128) scale(0.94) translate(-128 -128)"/>
   </g>
 </svg>

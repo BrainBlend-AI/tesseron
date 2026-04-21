@@ -8,6 +8,28 @@ const site = process.env.DOCS_SITE ?? 'https://brainblend-ai.github.io';
 const isDev = process.argv.slice(2).includes('dev');
 const base = isDev ? '/' : (process.env.DOCS_BASE ?? '/tesseron');
 
+// Astro does not auto-prefix `base` to `](/...)` links in Markdown, and
+// Starlight's Hero / LinkCard components pass `href` through untouched.
+// Prefix site-root-relative markdown links with `base` at build time.
+const basePrefix = base.replace(/\/$/, '');
+function remarkPrependBase() {
+  return (tree) => {
+    const visit = (node) => {
+      if (
+        (node.type === 'link' || node.type === 'definition') &&
+        typeof node.url === 'string' &&
+        node.url.startsWith('/') &&
+        !node.url.startsWith('//') &&
+        !node.url.startsWith(`${basePrefix}/`)
+      ) {
+        node.url = `${basePrefix}${node.url}`;
+      }
+      if (node.children) node.children.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
 export default defineConfig({
   site,
   base,
@@ -17,15 +39,16 @@ export default defineConfig({
     // Don't auto-curl quotes / turn `...` into `…`. Our prose is ASCII-clean
     // on purpose; smartypants was mangling code identifiers and Mermaid text.
     smartypants: false,
+    remarkPlugins: [remarkPrependBase],
   },
   integrations: [
     starlight({
       title: 'Tesseron',
       description: 'Expose typed web-app actions to MCP-compatible agents over WebSocket.',
       logo: {
-        light: './src/assets/logo-light.svg',
-        dark: './src/assets/logo-dark.svg',
-        replacesTitle: false,
+        light: './src/assets/tesseron-smallcaps-light.png',
+        dark: './src/assets/tesseron-smallcaps-dark.png',
+        replacesTitle: true,
       },
       favicon: '/favicon.svg',
       social: [
