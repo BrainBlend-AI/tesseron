@@ -10,6 +10,7 @@
 <p>
   <a href="https://github.com/BrainBlend-AI/tesseron/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/BrainBlend-AI/tesseron?style=flat-square&color=f59e0b&logo=github&labelColor=0b1220"></a>
   <a href="./LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/License-BUSL--1.1-f59e0b?style=flat-square&labelColor=0b1220"></a>
+  <a href="https://discord.gg/J3W9b5AZJR"><img alt="Discord" src="https://img.shields.io/badge/chat-on%20discord-7289DA?logo=discord&style=flat-square&labelColor=0b1220"></a>
   <img alt="Protocol 1.0.0" src="https://img.shields.io/badge/Protocol-1.0.0-f59e0b?style=flat-square&labelColor=0b1220">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white&labelColor=0b1220">
   <img alt="Node 20+" src="https://img.shields.io/badge/Node-%E2%89%A5%2020-339933?style=flat-square&logo=node.js&logoColor=white&labelColor=0b1220">
@@ -21,6 +22,7 @@
   <a href="./examples"><b>Examples</b></a> &nbsp;·&nbsp;
   <a href="#quick-install-claude-code"><b>Install</b></a> &nbsp;·&nbsp;
   <a href="#packages"><b>Packages</b></a> &nbsp;·&nbsp;
+  <a href="https://discord.gg/J3W9b5AZJR"><b>Discord</b></a> &nbsp;·&nbsp;
   <a href="https://github.com/BrainBlend-AI/tesseron/discussions"><b>Discussions</b></a>
 </p>
 
@@ -29,6 +31,8 @@
 </div>
 
 ---
+
+**NEW: Join our community on Discord at [discord.gg/J3W9b5AZJR](https://discord.gg/J3W9b5AZJR) — protocol questions, feedback, and SDK-contribution chat all welcome.**
 
 Live applications (browser tabs, Electron/Tauri desktop apps, Node daemons, CLIs) declare actions with a Zod-style builder; agents (Claude Code, Claude Desktop, Cursor, Copilot, Codex, Cline, ...) call them as MCP tools. Your real handler runs against your real state. **No browser automation, no scraping, no Playwright.**
 
