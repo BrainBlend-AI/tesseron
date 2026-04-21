@@ -1,6 +1,6 @@
 {
   "name": "@tesseron/server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Node SDK for Tesseron. Same API as @tesseron/web but for backend services.",
   "license": "BUSL-1.1",
   "author": {
@@ -31,7 +31,11 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
   "scripts": {
     "build": "tsup",

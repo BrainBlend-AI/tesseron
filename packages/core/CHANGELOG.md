@@ -1,5 +1,20 @@
 # @tesseron/core
 
+## 1.0.1
+
+### Patch Changes
+
+- Expanded each package's README to be a proper npm landing page. Each
+  now shows the Tesseron logo, a package-specific tagline, install
+  command, quick-start code example, what-you-get bullet list, pairing
+  guidance, doc links (main repo + SDK reference + protocol spec +
+  examples), license summary, and BrainBlend AI attribution. The previous
+  two-line descriptions left visitors landing on npm without enough
+  context to know what they were looking at or how to use it.
+
+  No code changes, no API changes — this is purely a docs release so the
+  npm package pages match the quality of the GitHub README.
+
 ## 1.0.0
 
 ### Major Changes
