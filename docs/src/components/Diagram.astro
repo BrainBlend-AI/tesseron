@@ -22,23 +22,23 @@
  * Rendering is inline themed SVG — gradients, filters, icons — driven by CSS
  * custom properties so dark/light swaps automatically via Starlight.
  */
-import ELK from "elkjs/lib/elk.bundled.js";
+import ELK from 'elkjs/lib/elk.bundled.js';
 
-type Variant = "neutral" | "accent" | "danger";
+type Variant = 'neutral' | 'accent' | 'danger';
 type IconName =
-  | "user"
-  | "window"
-  | "bridge"
-  | "agent"
-  | "shield"
-  | "lock"
-  | "cube"
-  | "packages"
-  | "server"
-  | "database"
-  | "check"
-  | "x"
-  | "arrow";
+  | 'user'
+  | 'window'
+  | 'bridge'
+  | 'agent'
+  | 'shield'
+  | 'lock'
+  | 'cube'
+  | 'packages'
+  | 'server'
+  | 'database'
+  | 'check'
+  | 'x'
+  | 'arrow';
 
 interface NodeSpec {
   id: string;
@@ -56,7 +56,7 @@ interface EdgeSpec {
   from: string;
   to: string;
   label?: string;
-  style?: "solid" | "dashed";
+  style?: 'solid' | 'dashed';
   bidirectional?: boolean;
   accent?: boolean;
   danger?: boolean;
@@ -65,7 +65,7 @@ interface EdgeSpec {
 interface Props {
   nodes: NodeSpec[];
   edges: EdgeSpec[];
-  direction?: "RIGHT" | "DOWN" | "LEFT" | "UP";
+  direction?: 'RIGHT' | 'DOWN' | 'LEFT' | 'UP';
   caption?: string;
   nodeWidth?: number;
   nodeHeight?: number;
@@ -76,7 +76,7 @@ interface Props {
 const {
   nodes,
   edges,
-  direction = "RIGHT",
+  direction = 'RIGHT',
   caption,
   nodeWidth = 200,
   nodeHeight = 128,
@@ -111,13 +111,19 @@ const elk = new ELK();
 // ELK's typed return omits the runtime-computed width/height/x/y and
 // edge `sections`, even though it always populates them for a laid-out
 // graph. Describe the shape we actually consume.
-interface LaidOutPoint { x: number; y: number; }
+interface LaidOutPoint {
+  x: number;
+  y: number;
+}
 interface LaidOutEdgeSection {
   startPoint: LaidOutPoint;
   endPoint: LaidOutPoint;
   bendPoints?: LaidOutPoint[];
 }
-interface LaidOutEdge { id: string; sections?: LaidOutEdgeSection[]; }
+interface LaidOutEdge {
+  id: string;
+  sections?: LaidOutEdgeSection[];
+}
 interface LaidOutNode {
   id: string;
   x?: number;
@@ -133,17 +139,17 @@ interface LaidOutGraph {
 }
 
 const layout = (await elk.layout({
-  id: "root",
+  id: 'root',
   layoutOptions: {
-    "elk.algorithm": "layered",
-    "elk.direction": direction,
-    "elk.spacing.nodeNode": String(spacing),
-    "elk.layered.spacing.nodeNodeBetweenLayers": String(spacing),
-    "elk.edgeRouting": "ORTHOGONAL",
-    "elk.layered.unnecessaryBendpoints": "true",
-    "elk.spacing.edgeNode": String(Math.floor(spacing / 2)),
-    "elk.spacing.edgeEdge": "20",
-    "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+    'elk.algorithm': 'layered',
+    'elk.direction': direction,
+    'elk.spacing.nodeNode': String(spacing),
+    'elk.layered.spacing.nodeNodeBetweenLayers': String(spacing),
+    'elk.edgeRouting': 'ORTHOGONAL',
+    'elk.layered.unnecessaryBendpoints': 'true',
+    'elk.spacing.edgeNode': String(Math.floor(spacing / 2)),
+    'elk.spacing.edgeEdge': '20',
+    'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
   },
   children: nodes.map((n) => ({
     id: n.id,
@@ -168,7 +174,10 @@ const nodeById = new Map(nodes.map((n) => [n.id, n]));
 const ARROW_W = 10;
 const ARROW_H = 10;
 
-interface Pt { x: number; y: number; }
+interface Pt {
+  x: number;
+  y: number;
+}
 
 // Build the arrow body as an SVG path, stopping short of the endpoints by
 // ARROW_W along each final segment so the triangles can carry the tip.
@@ -207,7 +216,7 @@ function edgeGeometry(
   // Build path through bends, but shorten first and last segments to land
   // on startBase / endBase instead of the raw points.
   const bodyPts: Pt[] = [startBase, ...pts.slice(1, -1), endBase];
-  let d = `M ${bodyPts[0]!.x} ${bodyPts[0]!.y}`;
+  let d = `M ${bodyPts[0]?.x} ${bodyPts[0]?.y}`;
   const r = 6;
   for (let i = 1; i < bodyPts.length - 1; i += 1) {
     const prev = bodyPts[i - 1]!;
@@ -224,7 +233,7 @@ function edgeGeometry(
     const cout = { x: curr.x + la * rr, y: curr.y + lb * rr };
     d += ` L ${cin.x} ${cin.y} Q ${curr.x} ${curr.y} ${cout.x} ${cout.y}`;
   }
-  d += ` L ${bodyPts[bodyPts.length - 1]!.x} ${bodyPts[bodyPts.length - 1]!.y}`;
+  d += ` L ${bodyPts[bodyPts.length - 1]?.x} ${bodyPts[bodyPts.length - 1]?.y}`;
 
   // End triangle: tip at `last`, base at `endBase`, spread perpendicular
   // to the last-segment direction by ARROW_H / 2.
@@ -237,8 +246,7 @@ function edgeGeometry(
     x: endBase.x - endPerp.x * (ARROW_H / 2),
     y: endBase.y - endPerp.y * (ARROW_H / 2),
   };
-  const endPoly =
-    `${endBaseA.x},${endBaseA.y} ${last.x},${last.y} ${endBaseB.x},${endBaseB.y}`;
+  const endPoly = `${endBaseA.x},${endBaseA.y} ${last.x},${last.y} ${endBaseB.x},${endBaseB.y}`;
 
   // Start triangle (if bidirectional): tip at `first`, base at `startBase`,
   // perpendicular to the first-segment direction (pointing away).
@@ -253,8 +261,7 @@ function edgeGeometry(
       x: startBase.x - startPerp.x * (ARROW_H / 2),
       y: startBase.y - startPerp.y * (ARROW_H / 2),
     };
-    startPoly =
-      `${startBaseA.x},${startBaseA.y} ${first.x},${first.y} ${startBaseB.x},${startBaseB.y}`;
+    startPoly = `${startBaseA.x},${startBaseA.y} ${first.x},${first.y} ${startBaseB.x},${startBaseB.y}`;
   }
 
   return { lineD: d, endPoly, startPoly };
@@ -271,7 +278,7 @@ function midpoint(section: {
   let total = 0;
   const segLens: number[] = [];
   for (let i = 0; i < pts.length - 1; i += 1) {
-    const l = Math.hypot(pts[i + 1]!.x - pts[i]!.x, pts[i + 1]!.y - pts[i]!.y);
+    const l = Math.hypot(pts[i + 1]?.x - pts[i]?.x, pts[i + 1]?.y - pts[i]?.y);
     segLens.push(l);
     total += l;
   }
@@ -280,13 +287,13 @@ function midpoint(section: {
     if (target <= segLens[i]!) {
       const t = target / segLens[i]!;
       return {
-        x: pts[i]!.x + (pts[i + 1]!.x - pts[i]!.x) * t + pad,
-        y: pts[i]!.y + (pts[i + 1]!.y - pts[i]!.y) * t + pad,
+        x: pts[i]?.x + (pts[i + 1]?.x - pts[i]?.x) * t + pad,
+        y: pts[i]?.y + (pts[i + 1]?.y - pts[i]?.y) * t + pad,
       };
     }
     target -= segLens[i]!;
   }
-  return { x: pts[0]!.x + pad, y: pts[0]!.y + pad };
+  return { x: pts[0]?.x + pad, y: pts[0]?.y + pad };
 }
 
 // Wrap label across multiple lines so it fits the available arrow gap.
@@ -295,7 +302,7 @@ function wrapLabel(label: string, maxChars: number): string[] {
   if (label.length <= maxChars) return [label];
   const tokens = label.split(/(\s+|(?<=[,{}]))/).filter((t) => t.length > 0);
   const lines: string[] = [];
-  let current = "";
+  let current = '';
   for (const token of tokens) {
     if (!current) {
       current = token.trimStart();

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { TesseronError } from '../src/errors.js';
+import { TesseronErrorCode } from '../src/protocol.js';
 import {
   CONFIRM_REQUESTED_SCHEMA,
   PERMISSIVE_ELICIT_SCHEMA,
   assertValidElicitSchema,
 } from '../src/schema-helpers.js';
-import { TesseronError } from '../src/errors.js';
-import { TesseronErrorCode } from '../src/protocol.js';
 
 describe('assertValidElicitSchema', () => {
   it('accepts a flat object with primitive leaves', () => {

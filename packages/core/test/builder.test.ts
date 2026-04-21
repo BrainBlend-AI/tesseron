@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
+import { describe, expect, it } from 'vitest';
 import type { ActionContext, RegisteredAction, RegisteredResource } from '../src/index.js';
 import { ActionBuilderImpl, ResourceBuilderImpl } from '../src/internal.js';
 
@@ -63,7 +63,7 @@ describe('ActionBuilderImpl', () => {
       .input(stringSchema)
       .handler((input) => input.toUpperCase());
 
-    const result = await registry.actions[0]!.handler('hi', noopCtx);
+    const result = await registry.actions[0]?.handler('hi', noopCtx);
     expect(result).toBe('HI');
   });
 });
@@ -84,7 +84,7 @@ describe('ResourceBuilderImpl', () => {
 
   it('builds a subscribable resource', () => {
     const registry = new CapturingRegistry();
-    let emitted: string[] = [];
+    const emitted: string[] = [];
     new ResourceBuilderImpl<string>('counter', registry).subscribe((emit) => {
       emit('a');
       emit('b');

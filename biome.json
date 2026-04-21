@@ -1,7 +1,15 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "files": {
-    "ignore": ["dist", "node_modules", ".turbo", "examples"]
+    "ignore": [
+      "dist",
+      "node_modules",
+      ".turbo",
+      "examples",
+      "**/.astro/**",
+      "plugin/server/**",
+      "assets/diagrams/**"
+    ]
   },
   "formatter": {
     "enabled": true,
@@ -12,7 +20,10 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "style": {
+        "noNonNullAssertion": "off"
+      }
     }
   },
   "organizeImports": {

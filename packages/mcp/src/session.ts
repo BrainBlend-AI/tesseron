@@ -1,11 +1,11 @@
-import type { WebSocket } from 'ws';
 import type {
   ActionManifestEntry,
   AppMetadata,
-  TesseronCapabilities,
   ResourceManifestEntry,
+  TesseronCapabilities,
 } from '@tesseron/core';
 import type { JsonRpcDispatcher } from '@tesseron/core/internal';
+import type { WebSocket } from 'ws';
 
 export interface Session {
   id: string;

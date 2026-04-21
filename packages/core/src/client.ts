@@ -1,9 +1,10 @@
-import {
-  ActionBuilderImpl,
-  type BuilderRegistry,
-  ResourceBuilderImpl,
-} from './builder-impl.js';
-import type { ActionBuilder, RegisteredAction, RegisteredResource, ResourceBuilder } from './builder.js';
+import { ActionBuilderImpl, type BuilderRegistry, ResourceBuilderImpl } from './builder-impl.js';
+import type {
+  ActionBuilder,
+  RegisteredAction,
+  RegisteredResource,
+  ResourceBuilder,
+} from './builder.js';
 import type {
   ActionContext,
   ConfirmRequest,
@@ -11,11 +12,12 @@ import type {
   ProgressUpdate,
   SampleRequest,
 } from './context.js';
+import { JsonRpcDispatcher } from './dispatcher.js';
 import {
   CancelledError,
-  TesseronError,
   ElicitationNotAvailableError,
   SamplingNotAvailableError,
+  TesseronError,
   TimeoutError,
 } from './errors.js';
 import {
@@ -23,8 +25,6 @@ import {
   type ActionManifestEntry,
   type ActionResultPayload,
   type AppMetadata,
-  type TesseronCapabilities,
-  TesseronErrorCode,
   type HelloParams,
   PROTOCOL_VERSION,
   type ResourceManifestEntry,
@@ -32,9 +32,10 @@ import {
   type ResourceReadResult,
   type ResourceSubscribeParams,
   type ResourceUnsubscribeParams,
+  type TesseronCapabilities,
+  TesseronErrorCode,
   type WelcomeResult,
 } from './protocol.js';
-import { JsonRpcDispatcher } from './dispatcher.js';
 import {
   CONFIRM_REQUESTED_SCHEMA,
   PERMISSIVE_ELICIT_SCHEMA,
@@ -154,7 +155,9 @@ export class TesseronClient implements BuilderRegistry {
     dispatcher.onNotification('actions/cancel', (params) => {
       this.handleCancel(params as { invocationId: string });
     });
-    dispatcher.on('resources/read', (params) => this.handleResourceRead(params as ResourceReadParams));
+    dispatcher.on('resources/read', (params) =>
+      this.handleResourceRead(params as ResourceReadParams),
+    );
     dispatcher.on('resources/subscribe', (params) =>
       this.handleResourceSubscribe(params as ResourceSubscribeParams),
     );
@@ -361,7 +364,10 @@ export class TesseronClient implements BuilderRegistry {
   private async handleResourceRead(params: ResourceReadParams): Promise<ResourceReadResult> {
     const resource = this.resources.get(params.name);
     if (!resource?.reader) {
-      throw new TesseronError(TesseronErrorCode.ActionNotFound, `Resource not readable: ${params.name}`);
+      throw new TesseronError(
+        TesseronErrorCode.ActionNotFound,
+        `Resource not readable: ${params.name}`,
+      );
     }
     const value = await resource.reader();
     return { value };

@@ -208,8 +208,8 @@ export interface TesseronMethods {
   'elicitation/request': { params: ElicitationRequestParams; result: ElicitationResult };
   'actions/invoke': { params: ActionInvokeParams; result: ActionResultPayload };
   'resources/read': { params: ResourceReadParams; result: ResourceReadResult };
-  'resources/subscribe': { params: ResourceSubscribeParams; result: void };
-  'resources/unsubscribe': { params: ResourceUnsubscribeParams; result: void };
+  'resources/subscribe': { params: ResourceSubscribeParams; result: undefined };
+  'resources/unsubscribe': { params: ResourceUnsubscribeParams; result: undefined };
 }
 
 export interface TesseronNotifications {

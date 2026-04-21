@@ -1,4 +1,3 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
@@ -11,9 +10,10 @@ import {
   ReadResourceResultSchema,
   ResourceUpdatedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { ServerTesseronClient } from '@tesseron/server';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import { TesseronGateway, McpAgentBridge } from '../src/index.js';
+import { ServerTesseronClient } from '@tesseron/server';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { McpAgentBridge, TesseronGateway } from '../src/index.js';
 
 const PORT = 7810;
 const URL = `ws://127.0.0.1:${PORT}`;
@@ -63,7 +63,11 @@ async function callTool(
   args: unknown,
   options?: { progressToken?: string | number; signal?: AbortSignal },
 ): Promise<{ text: string; isError: boolean }> {
-  const params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> } = {
+  const params: {
+    name: string;
+    arguments?: Record<string, unknown>;
+    _meta?: Record<string, unknown>;
+  } = {
     name,
     arguments: (args ?? {}) as Record<string, unknown>,
   };
@@ -75,9 +79,7 @@ async function callTool(
     CallToolResultSchema,
     options?.signal ? { signal: options.signal } : undefined,
   );
-  const text = result.content
-    .map((c) => (c.type === 'text' ? c.text : `[${c.type}]`))
-    .join('');
+  const text = result.content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('');
   return { text, isError: result.isError === true };
 }
 
@@ -300,7 +302,7 @@ describe('Phase 3 — cancellation forwarding', () => {
 });
 
 describe('Phase 3 — sampling round trip', () => {
-  it('lets a handler call ctx.sample() and receive the agent\'s text response', async () => {
+  it("lets a handler call ctx.sample() and receive the agent's text response", async () => {
     let observedPrompt = '';
     client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
       const firstMessage = request.params.messages[0];
@@ -594,19 +596,21 @@ describe('Phase 3 — ctx.signal aborts pending confirm/elicit', () => {
 });
 
 describe('Phase 3 — resources exposure', () => {
-  it('lists and reads a session\'s resources via MCP', async () => {
+  it("lists and reads a session's resources via MCP", async () => {
     let currentRoute = '/orders/123';
     await setupAndClaim('res1', (s) => {
-      s.resource<string>('currentRoute').describe('Current route').read(() => currentRoute);
+      s.resource<string>('currentRoute')
+        .describe('Current route')
+        .read(() => currentRoute);
     });
 
     const resources = await client.request({ method: 'resources/list' }, ListResourcesResultSchema);
     const target = resources.resources.find((r) => r.name === 'res1__currentRoute');
     expect(target).toBeTruthy();
-    expect(target!.uri).toBe('tesseron://res1/currentRoute');
+    expect(target?.uri).toBe('tesseron://res1/currentRoute');
 
     const read = await client.request(
-      { method: 'resources/read', params: { uri: target!.uri } },
+      { method: 'resources/read', params: { uri: target?.uri } },
       ReadResourceResultSchema,
     );
     const content = read.contents[0]!;
@@ -614,10 +618,10 @@ describe('Phase 3 — resources exposure', () => {
 
     currentRoute = '/orders/456';
     const read2 = await client.request(
-      { method: 'resources/read', params: { uri: target!.uri } },
+      { method: 'resources/read', params: { uri: target?.uri } },
       ReadResourceResultSchema,
     );
-    expect(read2.contents[0]!.text).toBe('/orders/456');
+    expect(read2.contents[0]?.text).toBe('/orders/456');
   });
 
   it('forwards resource subscription updates from SDK to MCP notifications', async () => {
@@ -650,9 +654,6 @@ describe('Phase 3 — resources exposure', () => {
 
     expect(updates.filter((u) => u === uri).length).toBeGreaterThanOrEqual(2);
 
-    await client.request(
-      { method: 'resources/unsubscribe', params: { uri } },
-      EmptyResultSchema,
-    );
+    await client.request({ method: 'resources/unsubscribe', params: { uri } }, EmptyResultSchema);
   });
 });

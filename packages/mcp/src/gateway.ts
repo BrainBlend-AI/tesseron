@@ -329,14 +329,12 @@ export class TesseronGateway extends EventEmitter {
       if (theirMajor !== ourMajor) {
         throw new TesseronError(
           TesseronErrorCode.ProtocolMismatch,
-          `Gateway speaks protocol ${PROTOCOL_VERSION}; SDK sent ${helloParams.protocolVersion}. ` +
-            'Major version mismatch — pin compatible package versions.',
+          `Gateway speaks protocol ${PROTOCOL_VERSION}; SDK sent ${helloParams.protocolVersion}. Major version mismatch — pin compatible package versions.`,
         );
       }
       if (theirMinor !== ourMinor) {
         logToStderr(
-          `[tesseron] protocol minor version mismatch: gateway=${PROTOCOL_VERSION}, SDK=${helloParams.protocolVersion}. ` +
-            'New fields (e.g. ElicitationResult.action) may be silently dropped. Rebuild plugin/server/index.cjs to sync.',
+          `[tesseron] protocol minor version mismatch: gateway=${PROTOCOL_VERSION}, SDK=${helloParams.protocolVersion}. New fields (e.g. ElicitationResult.action) may be silently dropped. Rebuild plugin/server/index.cjs to sync.`,
         );
       }
 

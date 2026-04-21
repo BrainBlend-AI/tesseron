@@ -1,13 +1,10 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import {
-  CallToolResultSchema,
-  ListToolsResultSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import { ServerTesseronClient } from '@tesseron/server';
+import { CallToolResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import { TesseronGateway, McpAgentBridge } from '../src/index.js';
+import { ServerTesseronClient } from '@tesseron/server';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { McpAgentBridge, TesseronGateway } from '../src/index.js';
 
 const PORT = 7800;
 const URL = `ws://127.0.0.1:${PORT}`;
@@ -66,9 +63,7 @@ async function callTool(name: string, args: unknown): Promise<CallOutcome> {
     { method: 'tools/call', params: { name, arguments: (args ?? {}) as Record<string, unknown> } },
     CallToolResultSchema,
   );
-  const text = result.content
-    .map((c) => (c.type === 'text' ? c.text : `[${c.type}]`))
-    .join('');
+  const text = result.content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('');
   return { text, isError: result.isError === true };
 }
 
@@ -117,7 +112,9 @@ describe('Tesseron MCP integration', () => {
 
   it('completes the click-to-connect handshake and invokes a simple action', async () => {
     await setupAndClaim('shop1', (s) => {
-      s.action('greet').describe('greet').handler(() => 'hello');
+      s.action('greet')
+        .describe('greet')
+        .handler(() => 'hello');
     });
 
     expect(await listToolNames()).toContain('shop1__greet');
@@ -152,8 +149,8 @@ describe('Tesseron MCP integration', () => {
     expect(result.isError).toBe(false);
     const parsed = JSON.parse(result.text) as SearchOutput;
     expect(parsed.items).toHaveLength(2);
-    expect(parsed.items[0]!.tags).toContain('urgent');
-    expect(parsed.items[1]!.tags).toContain('open');
+    expect(parsed.items[0]?.tags).toContain('urgent');
+    expect(parsed.items[1]?.tags).toContain('open');
     expect(parsed.total).toBe(2);
   });
 
@@ -215,7 +212,7 @@ describe('Tesseron MCP integration', () => {
     expect(r2.text).toBe('I am a2');
   });
 
-  it('removes a session\'s tools when its WebSocket disconnects', async () => {
+  it("removes a session's tools when its WebSocket disconnects", async () => {
     const { sdk } = await setupAndClaim('eph1', (s) => {
       s.action('boop').handler(() => 'b');
     });
@@ -279,11 +276,12 @@ describe('Tesseron MCP integration', () => {
 
   it('runs concurrent invocations on the same action independently', async () => {
     await setupAndClaim('cc1', (s) => {
-      s.action<{ delayMs: number; tag: string }, string>('echoDelayed')
-        .handler(async ({ delayMs, tag }) => {
+      s.action<{ delayMs: number; tag: string }, string>('echoDelayed').handler(
+        async ({ delayMs, tag }) => {
           await new Promise((r) => setTimeout(r, delayMs));
           return tag;
-        });
+        },
+      );
     });
 
     const [a, b, c] = await Promise.all([
@@ -298,12 +296,14 @@ describe('Tesseron MCP integration', () => {
 
   it('reports input schema in tools/list so agents can introspect arguments', async () => {
     await setupAndClaim('schema1', (s) => {
-      s.action('greet').input(stringNameSchema, {
-        type: 'object',
-        properties: { name: { type: 'string', description: 'the person to greet' } },
-        required: ['name'],
-        additionalProperties: false,
-      }).handler(({ name }: { name: string }) => `hi ${name}`);
+      s.action('greet')
+        .input(stringNameSchema, {
+          type: 'object',
+          properties: { name: { type: 'string', description: 'the person to greet' } },
+          required: ['name'],
+          additionalProperties: false,
+        })
+        .handler(({ name }: { name: string }) => `hi ${name}`);
     });
 
     const tools = await client.request({ method: 'tools/list' }, ListToolsResultSchema);
@@ -356,7 +356,9 @@ describe('Tesseron MCP integration', () => {
     expect(payload.mcp_server_name).toBe('tesseron');
     const entry = payload.sessions.find((a) => a.app_id === 'listable');
     expect(entry).toBeTruthy();
-    expect(entry?.actions.some((a) => a.action === 'ping' && a.mcp_tool_name === 'listable__ping')).toBe(true);
+    expect(
+      entry?.actions.some((a) => a.action === 'ping' && a.mcp_tool_name === 'listable__ping'),
+    ).toBe(true);
     const stats = entry?.resources.find((r) => r.uri === 'tesseron://listable/stats');
     expect(stats).toBeTruthy();
     expect(stats?.read_via.preferred.tool).toBe('tesseron__read_resource');
@@ -414,7 +416,10 @@ describe('Tool surface modes', () => {
     sdk.action('ping').handler(() => 'pong');
     const welcome = await sdk.connect(`ws://127.0.0.1:${port}`);
     const claim = await c.request(
-      { method: 'tools/call', params: { name: 'tesseron__claim_session', arguments: { code: welcome.claimCode } } },
+      {
+        method: 'tools/call',
+        params: { name: 'tesseron__claim_session', arguments: { code: welcome.claimCode } },
+      },
       CallToolResultSchema,
     );
     expect(claim.isError).toBeFalsy();

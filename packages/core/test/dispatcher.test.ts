@@ -58,8 +58,6 @@ describe('JsonRpcDispatcher', () => {
     const sent: unknown[] = [];
     const d = new JsonRpcDispatcher((m) => sent.push(m));
     d.notify('hello', { x: 1 });
-    expect(sent).toEqual([
-      { jsonrpc: JSONRPC_VERSION, method: 'hello', params: { x: 1 } },
-    ]);
+    expect(sent).toEqual([{ jsonrpc: JSONRPC_VERSION, method: 'hello', params: { x: 1 } }]);
   });
 });

@@ -60,7 +60,7 @@ describe('TesseronClient end-to-end', () => {
       close: () => {},
     };
     // Re-wire so gateway sends to this transport's handler
-    const originalSend = gateway['send'] as (m: unknown) => void;
+    const originalSend = gateway.send as (m: unknown) => void;
     Object.assign(gateway, {
       send: (m: unknown) => queueMicrotask(() => clientMessageHandler?.(m)),
     });

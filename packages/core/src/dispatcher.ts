@@ -1,8 +1,5 @@
 import { TesseronError } from './errors.js';
 import {
-  TesseronErrorCode,
-  type TesseronMethods,
-  type TesseronNotifications,
   JSONRPC_VERSION,
   type JsonRpcErrorPayload,
   type JsonRpcErrorResponse,
@@ -10,6 +7,9 @@ import {
   type JsonRpcNotification,
   type JsonRpcRequest,
   type JsonRpcSuccessResponse,
+  TesseronErrorCode,
+  type TesseronMethods,
+  type TesseronNotifications,
 } from './protocol.js';
 
 type RequestHandler = (params: unknown) => Promise<unknown> | unknown;
@@ -40,7 +40,9 @@ export class JsonRpcDispatcher {
 
   on<M extends keyof TesseronMethods>(
     method: M,
-    handler: (params: TesseronMethods[M]['params']) => Promise<TesseronMethods[M]['result']> | TesseronMethods[M]['result'],
+    handler: (
+      params: TesseronMethods[M]['params'],
+    ) => Promise<TesseronMethods[M]['result']> | TesseronMethods[M]['result'],
   ): void;
   on(method: string, handler: RequestHandler): void;
   on(method: string, handler: RequestHandler): void {
@@ -99,10 +101,7 @@ export class JsonRpcDispatcher {
     });
   }
 
-  notify<N extends keyof TesseronNotifications>(
-    method: N,
-    params: TesseronNotifications[N],
-  ): void;
+  notify<N extends keyof TesseronNotifications>(method: N, params: TesseronNotifications[N]): void;
   notify(method: string, params: unknown): void;
   notify(method: string, params: unknown): void {
     const message: JsonRpcNotification = { jsonrpc: JSONRPC_VERSION, method, params };

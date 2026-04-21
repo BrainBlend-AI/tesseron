@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
-import WebSocket from 'ws';
 import type { Transport } from '@tesseron/core';
+import WebSocket from 'ws';
 
 export class NodeWebSocketTransport implements Transport {
   private readonly ws: WebSocket;

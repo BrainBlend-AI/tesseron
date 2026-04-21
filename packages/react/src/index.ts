@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import {
   type ActionAnnotations,
   type ActionContext,
-  tesseron,
+  type WebTesseronClient,
   type WelcomeResult,
-  WebTesseronClient,
+  tesseron,
 } from '@tesseron/web';
+import { useEffect, useRef, useState } from 'react';
 
 export * from '@tesseron/web';
 
@@ -69,9 +69,9 @@ export function useTesseronResource<T = unknown>(
     const o = optionsRef.current;
     if (o.description) builder = builder.describe(o.description);
     if (o.output) builder = builder.output(o.output, o.outputJsonSchema);
-    if (o.read) builder = builder.read(() => optionsRef.current.read!());
+    if (o.read) builder = builder.read(() => optionsRef.current.read?.());
     if (o.subscribe) {
-      builder = builder.subscribe((emit) => optionsRef.current.subscribe!(emit));
+      builder = builder.subscribe((emit) => optionsRef.current.subscribe?.(emit));
     }
     return () => {
       client.removeResource(name);

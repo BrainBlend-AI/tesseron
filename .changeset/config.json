@@ -1,18 +1,9 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@3.1.4/schema.json",
-  "changelog": [
-    "@changesets/changelog-github",
-    { "repo": "KennyVaneetvelde/tesseron" }
-  ],
+  "changelog": ["@changesets/changelog-github", { "repo": "KennyVaneetvelde/tesseron" }],
   "commit": false,
   "fixed": [
-    [
-      "@tesseron/core",
-      "@tesseron/web",
-      "@tesseron/server",
-      "@tesseron/react",
-      "@tesseron/mcp"
-    ]
+    ["@tesseron/core", "@tesseron/web", "@tesseron/server", "@tesseron/react", "@tesseron/mcp"]
   ],
   "linked": [],
   "access": "public",

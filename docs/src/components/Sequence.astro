@@ -22,21 +22,21 @@
  *   />
  */
 
-type Variant = "neutral" | "accent" | "danger";
+type Variant = 'neutral' | 'accent' | 'danger';
 type IconName =
-  | "user"
-  | "window"
-  | "bridge"
-  | "agent"
-  | "shield"
-  | "lock"
-  | "cube"
-  | "packages"
-  | "server"
-  | "database"
-  | "check"
-  | "x"
-  | "arrow";
+  | 'user'
+  | 'window'
+  | 'bridge'
+  | 'agent'
+  | 'shield'
+  | 'lock'
+  | 'cube'
+  | 'packages'
+  | 'server'
+  | 'database'
+  | 'check'
+  | 'x'
+  | 'arrow';
 
 interface ActorSpec {
   id: string;
@@ -50,7 +50,7 @@ interface MessageStep {
   from: string;
   to: string;
   label: string;
-  style?: "solid" | "dashed";
+  style?: 'solid' | 'dashed';
   accent?: boolean;
   danger?: boolean;
 }
@@ -66,7 +66,7 @@ interface SelfStep {
   /** Self-arrow on one actor — loops back. */
   self: string;
   label: string;
-  style?: "solid" | "dashed";
+  style?: 'solid' | 'dashed';
 }
 
 type Step = MessageStep | NoteStep | SelfStep;
@@ -94,9 +94,9 @@ const {
 } = Astro.props;
 
 // Helpers
-const isMessage = (s: Step): s is MessageStep => "from" in s && "to" in s;
-const isNote = (s: Step): s is NoteStep => "note" in s;
-const isSelf = (s: Step): s is SelfStep => "self" in s;
+const isMessage = (s: Step): s is MessageStep => 'from' in s && 'to' in s;
+const isNote = (s: Step): s is NoteStep => 'note' in s;
+const isSelf = (s: Step): s is SelfStep => 'self' in s;
 
 // Icons (same set as Diagram)
 const icons: Record<IconName, string> = {
@@ -152,7 +152,7 @@ function wrapLabel(label: string, maxChars = 32): string[] {
   if (label.length <= maxChars) return [label];
   const tokens = label.split(/(\s+|(?<=[,{}]))/).filter((t) => t.length > 0);
   const lines: string[] = [];
-  let current = "";
+  let current = '';
   for (const token of tokens) {
     if (!current) {
       current = token.trimStart();
