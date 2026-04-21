@@ -8,14 +8,14 @@
     "email": "kenny.vaneetvelde@gmail.com",
     "url": "https://brainblendai.com/"
   },
-  "homepage": "https://github.com/KennyVaneetvelde/tesseron#readme",
+  "homepage": "https://github.com/BrainBlend-AI/tesseron#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KennyVaneetvelde/tesseron.git",
+    "url": "git+https://github.com/BrainBlend-AI/tesseron.git",
     "directory": "packages/server"
   },
   "bugs": {
-    "url": "https://github.com/KennyVaneetvelde/tesseron/issues"
+    "url": "https://github.com/BrainBlend-AI/tesseron/issues"
   },
   "keywords": [
     "mcp",

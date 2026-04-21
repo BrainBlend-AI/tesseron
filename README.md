@@ -8,7 +8,7 @@
 ### Typed web-app actions for MCP-compatible AI agents, over WebSocket.
 
 <p>
-  <a href="https://github.com/KennyVaneetvelde/tesseron/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/KennyVaneetvelde/tesseron?style=flat-square&color=f59e0b&logo=github&labelColor=0b1220"></a>
+  <a href="https://github.com/BrainBlend-AI/tesseron/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/BrainBlend-AI/tesseron?style=flat-square&color=f59e0b&logo=github&labelColor=0b1220"></a>
   <a href="./LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/License-BUSL--1.1-f59e0b?style=flat-square&labelColor=0b1220"></a>
   <img alt="Protocol 1.0.0" src="https://img.shields.io/badge/Protocol-1.0.0-f59e0b?style=flat-square&labelColor=0b1220">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white&labelColor=0b1220">
@@ -17,11 +17,11 @@
 </p>
 
 <p>
-  <a href="https://kennyvaneetvelde.github.io/tesseron/"><b>Docs</b></a> &nbsp;·&nbsp;
+  <a href="https://brainblend-ai.github.io/tesseron/"><b>Docs</b></a> &nbsp;·&nbsp;
   <a href="./examples"><b>Examples</b></a> &nbsp;·&nbsp;
   <a href="#quick-install-claude-code"><b>Install</b></a> &nbsp;·&nbsp;
   <a href="#packages"><b>Packages</b></a> &nbsp;·&nbsp;
-  <a href="https://github.com/KennyVaneetvelde/tesseron/discussions"><b>Discussions</b></a>
+  <a href="https://github.com/BrainBlend-AI/tesseron/discussions"><b>Discussions</b></a>
 </p>
 
 <a href="https://brainblendai.com/"><img src="./assets/brainblend-ai/logo.svg" width="22" height="18" align="center" alt="BrainBlend AI"></a> <sub>Built by <a href="https://brainblendai.com/"><b>BrainBlend AI</b></a></sub>
@@ -48,7 +48,7 @@ Web apps declare actions with a Zod-style builder; agents (Claude Code, Claude D
 ## Quick install (Claude Code)
 
 ```text
-/plugin marketplace add KennyVaneetvelde/tesseron
+/plugin marketplace add BrainBlend-AI/tesseron
 /plugin install tesseron@tesseron
 ```
 
@@ -132,10 +132,10 @@ Bug reports, protocol refinements, new framework adapters, and improvements to t
 
 ## Star history
 
-<a href="https://star-history.com/#KennyVaneetvelde/tesseron&Date">
+<a href="https://star-history.com/#BrainBlend-AI/tesseron&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KennyVaneetvelde/tesseron&type=Date&theme=dark">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=KennyVaneetvelde/tesseron&type=Date" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=BrainBlend-AI/tesseron&type=Date&theme=dark">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=BrainBlend-AI/tesseron&type=Date" width="720">
   </picture>
 </a>
 

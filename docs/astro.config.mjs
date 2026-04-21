@@ -2,7 +2,7 @@ import starlight from '@astrojs/starlight';
 // @ts-check
 import { defineConfig } from 'astro/config';
 
-const site = process.env.DOCS_SITE ?? 'https://kennyvaneetvelde.github.io';
+const site = process.env.DOCS_SITE ?? 'https://brainblend-ai.github.io';
 // In `astro dev`, serve from the root so http://127.0.0.1:4321/ works.
 // In `astro build` / CI, publish under `/tesseron` for GitHub Pages.
 const isDev = process.argv.slice(2).includes('dev');
@@ -32,11 +32,11 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/KennyVaneetvelde/tesseron',
+          href: 'https://github.com/BrainBlend-AI/tesseron',
         },
       ],
       editLink: {
-        baseUrl: 'https://github.com/KennyVaneetvelde/tesseron/edit/main/docs/',
+        baseUrl: 'https://github.com/BrainBlend-AI/tesseron/edit/main/docs/',
       },
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 4 },
       lastUpdated: true,

@@ -5,7 +5,7 @@ description: Svelte 5 runes (`$state`, `$derived`). Mutation via direct reassign
 
 **What it teaches:** integrating Tesseron with Svelte 5's rune-based reactivity. Handlers reassign `let todos = $state(...)` and Svelte re-renders.
 
-**Source:** [`examples/svelte-todo`](https://github.com/KennyVaneetvelde/tesseron/tree/main/examples/svelte-todo)
+**Source:** [`examples/svelte-todo`](https://github.com/BrainBlend-AI/tesseron/tree/main/examples/svelte-todo)
 
 ## Run it
 

@@ -21,7 +21,7 @@ Tesseron is a TypeScript SDK + matching MCP gateway that exposes typed web-app a
 ### Install
 
 ```text
-/plugin marketplace add KennyVaneetvelde/tesseron
+/plugin marketplace add BrainBlend-AI/tesseron
 /plugin install tesseron@tesseron
 ```
 
@@ -43,7 +43,7 @@ tesseron
 await tesseron.connect();
 ```
 
-See the [README](https://github.com/KennyVaneetvelde/tesseron#readme) for the full client compatibility matrix and the [docs site](https://kennyvaneetvelde.github.io/tesseron/) for the protocol reference, SDK API, and walkthroughs.
+See the [README](https://github.com/BrainBlend-AI/tesseron#readme) for the full client compatibility matrix and the [docs site](https://brainblend-ai.github.io/tesseron/) for the protocol reference, SDK API, and walkthroughs.
 
 ### License
 
@@ -56,4 +56,4 @@ Phase 4 items (Streamable HTTP transport, devtools UI, `create-tesseron` scaffol
 
 ---
 
-**Full changelog:** see the per-package `CHANGELOG.md` files or [compare view](https://github.com/KennyVaneetvelde/tesseron/commits/main).
+**Full changelog:** see the per-package `CHANGELOG.md` files or [compare view](https://github.com/BrainBlend-AI/tesseron/commits/main).

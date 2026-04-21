@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@3.1.4/schema.json",
-  "changelog": ["@changesets/changelog-github", { "repo": "KennyVaneetvelde/tesseron" }],
+  "changelog": ["@changesets/changelog-github", { "repo": "BrainBlend-AI/tesseron" }],
   "commit": false,
   "fixed": [
     ["@tesseron/core", "@tesseron/web", "@tesseron/server", "@tesseron/react", "@tesseron/mcp"]

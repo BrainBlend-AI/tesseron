@@ -5,7 +5,7 @@ description: REST API + Tesseron on the same Node process, backed by the same st
 
 **What it teaches:** how to expose the same backend operations via two channels at once - HTTP for human / programmatic clients, Tesseron for the agent. Neither knows the other exists.
 
-**Source:** [`examples/express-todo`](https://github.com/KennyVaneetvelde/tesseron/tree/main/examples/express-todo)
+**Source:** [`examples/express-todo`](https://github.com/BrainBlend-AI/tesseron/tree/main/examples/express-todo)
 
 ## Run it
 

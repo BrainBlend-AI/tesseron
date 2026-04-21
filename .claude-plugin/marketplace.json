@@ -4,7 +4,7 @@
   "owner": {
     "name": "Kenny Vaneetvelde",
     "email": "kenny.vaneetvelde@gmail.com",
-    "url": "https://github.com/KennyVaneetvelde"
+    "url": "https://github.com/BrainBlend-AI"
   },
   "metadata": {
     "description": "Tesseron marketplace — ships the Tesseron Claude Code plugin (MCP gateway for typed web-app actions over WebSocket).",
@@ -18,7 +18,7 @@
       "description": "MCP gateway for Tesseron. Lets any web app expose typed actions to Claude over WebSocket without browser automation.",
       "category": "integration",
       "tags": ["mcp", "web", "actions", "react", "svelte", "vue", "websocket"],
-      "homepage": "https://github.com/KennyVaneetvelde/tesseron"
+      "homepage": "https://github.com/BrainBlend-AI/tesseron"
     }
   ]
 }

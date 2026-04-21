@@ -5,7 +5,7 @@ description: Headless Node service - no HTTP, no browser. Proves the SDK isn't t
 
 **What it teaches:** a pure-Node Tesseron integration. No Express, no web server - just a Node script that registers actions and connects. Good when you're building a CLI, a daemon, or a worker that Claude should drive.
 
-**Source:** [`examples/node-todo`](https://github.com/KennyVaneetvelde/tesseron/tree/main/examples/node-todo)
+**Source:** [`examples/node-todo`](https://github.com/BrainBlend-AI/tesseron/tree/main/examples/node-todo)
 
 ## Run it
 

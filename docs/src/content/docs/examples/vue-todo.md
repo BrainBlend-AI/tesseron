@@ -5,7 +5,7 @@ description: Vue 3 composition API with `ref()` and `computed()`.
 
 **What it teaches:** integrating Tesseron with Vue 3's reactivity. Handlers mutate `todos.value` and `computed()` recomputes downstream derived state.
 
-**Source:** [`examples/vue-todo`](https://github.com/KennyVaneetvelde/tesseron/tree/main/examples/vue-todo)
+**Source:** [`examples/vue-todo`](https://github.com/BrainBlend-AI/tesseron/tree/main/examples/vue-todo)
 
 ## Run it
 
