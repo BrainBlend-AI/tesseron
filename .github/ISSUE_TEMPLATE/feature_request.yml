@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a new capability, API, or workflow.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the use case first. We care more about the underlying need than the proposed API.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Sketch the API or behavior. Pseudocode is fine.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you try? What's blocking the workaround?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      description: Which surface(s) would this touch?
+      options:
+        - label: Protocol (wire format, new methods, new capabilities)
+        - label: "@tesseron/core"
+        - label: "@tesseron/web"
+        - label: "@tesseron/server"
+        - label: "@tesseron/react"
+        - label: "@tesseron/mcp (gateway)"
+        - label: Claude Code plugin
+        - label: Docs / examples

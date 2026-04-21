@@ -1,0 +1,64 @@
+name: Bug report
+description: Something in Tesseron is broken or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What's the bug?
+      description: One or two sentences. Save longer context for the repro section.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Paste a short snippet or link to a repo/gist. The smaller the repro, the faster the fix.
+      placeholder: |
+        ```ts
+        tesseron.action('x').input(z.object({})).handler(...);
+        // observed: ...
+        // expected: ...
+        ```
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "Output of `pnpm list @tesseron/core @tesseron/web @tesseron/server @tesseron/mcp` (or whichever packages are involved)."
+      placeholder: "@tesseron/core 1.0.0, @tesseron/web 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      options:
+        - Claude Code
+        - Claude Desktop
+        - Cursor
+        - Codex
+        - VS Code + Copilot
+        - goose
+        - fast-agent
+        - Other (describe below)
+        - N/A
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      placeholder: "Node 20.x / Chrome 125 / Firefox 127 / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Gateway stderr, browser console, agent transcripts — whatever's most useful. Please strip anything sensitive.
+      render: shell
