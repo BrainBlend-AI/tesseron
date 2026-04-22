@@ -1,4 +1,9 @@
-import { TesseronClient, type Transport, type WelcomeResult } from '@tesseron/core';
+import {
+  type ConnectOptions,
+  TesseronClient,
+  type Transport,
+  type WelcomeResult,
+} from '@tesseron/core';
 import { NodeWebSocketTransport } from './transport.js';
 
 export * from '@tesseron/core';
@@ -11,15 +16,20 @@ export const DEFAULT_GATEWAY_URL = 'ws://localhost:7475';
  * Node-side {@link TesseronClient} with a WebSocket-aware `connect` overload.
  * Pass nothing to use {@link DEFAULT_GATEWAY_URL}, a URL string to connect to
  * another gateway, or a custom {@link Transport} to bypass WebSocket entirely.
+ * The optional second argument forwards {@link ConnectOptions} (e.g. session
+ * resume) to the core client.
  */
 export class ServerTesseronClient extends TesseronClient {
-  override async connect(target?: Transport | string): Promise<WelcomeResult> {
+  override async connect(
+    target?: Transport | string,
+    options?: ConnectOptions,
+  ): Promise<WelcomeResult> {
     if (target && typeof target !== 'string') {
-      return super.connect(target);
+      return super.connect(target, options);
     }
     const transport = new NodeWebSocketTransport(target ?? DEFAULT_GATEWAY_URL);
     await transport.ready();
-    return super.connect(transport);
+    return super.connect(transport, options);
   }
 }
 

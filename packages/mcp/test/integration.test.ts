@@ -275,6 +275,154 @@ describe('Tesseron MCP integration', () => {
     expect(welcome.resumeToken).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
+  it('resumes a claimed session on a fresh SDK instance', async () => {
+    // First SDK: open + claim.
+    const sdk1 = newSdk();
+    sdk1.app({ id: 'rsm1', name: 'rsm1', origin: 'http://localhost' });
+    sdk1.action('greet').handler(() => 'hi-before');
+    const welcome1 = await sdk1.connect(URL);
+    await callTool('tesseron__claim_session', { code: welcome1.claimCode! });
+    expect(await listToolNames()).toContain('rsm1__greet');
+
+    // Simulate tab refresh: drop the socket.
+    await sdk1.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await listToolNames()).not.toContain('rsm1__greet');
+
+    // Fresh SDK, same app, resume with the stashed credentials.
+    const sdk2 = newSdk();
+    sdk2.app({ id: 'rsm1', name: 'rsm1', origin: 'http://localhost' });
+    sdk2.action('greet').handler(() => 'hi-after');
+    const welcome2 = await sdk2.connect(URL, {
+      resume: {
+        sessionId: welcome1.sessionId,
+        resumeToken: welcome1.resumeToken!,
+      },
+    });
+
+    expect(welcome2.sessionId).toBe(welcome1.sessionId);
+    expect(welcome2.resumeToken).toBeTruthy();
+    // Token rotates on every successful resume (one-shot).
+    expect(welcome2.resumeToken).not.toBe(welcome1.resumeToken);
+    // Already claimed, no new claim code issued.
+    expect(welcome2.claimCode).toBeUndefined();
+
+    // Give the bridge a beat to re-advertise.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await listToolNames()).toContain('rsm1__greet');
+
+    // Handler from the fresh SDK is the one that runs.
+    const result = await callTool('rsm1__greet', {});
+    expect(result.text).toBe('hi-after');
+  });
+
+  it('rejects resume with a bad token', async () => {
+    const sdk1 = newSdk();
+    sdk1.app({ id: 'rsm2', name: 'rsm2', origin: 'http://localhost' });
+    sdk1.action('greet').handler(() => 'hi');
+    const welcome1 = await sdk1.connect(URL);
+    await callTool('tesseron__claim_session', { code: welcome1.claimCode! });
+    await sdk1.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sdk2 = newSdk();
+    sdk2.app({ id: 'rsm2', name: 'rsm2', origin: 'http://localhost' });
+    sdk2.action('greet').handler(() => 'hi');
+    await expect(
+      sdk2.connect(URL, {
+        resume: {
+          sessionId: welcome1.sessionId,
+          resumeToken: '0000000000000000000000000000000x', // 32 chars, wrong value
+        },
+      }),
+    ).rejects.toThrow(/invalid resumetoken/i);
+  });
+
+  it('rejects resume with an unknown session id', async () => {
+    const sdk = newSdk();
+    sdk.app({ id: 'unk1', name: 'unk1', origin: 'http://localhost' });
+    sdk.action('x').handler(() => 'x');
+    await expect(
+      sdk.connect(URL, {
+        resume: {
+          sessionId: 's_does_not_exist',
+          resumeToken: '00000000000000000000000000000000',
+        },
+      }),
+    ).rejects.toThrow(/no resumable session/i);
+  });
+
+  it('rejects resume of an unclaimed zombie (caller should fall back to hello)', async () => {
+    const sdk1 = newSdk();
+    sdk1.app({ id: 'unc1', name: 'unc1', origin: 'http://localhost' });
+    sdk1.action('x').handler(() => 'x');
+    const welcome1 = await sdk1.connect(URL);
+    // Deliberately don't claim.
+    await sdk1.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sdk2 = newSdk();
+    sdk2.app({ id: 'unc1', name: 'unc1', origin: 'http://localhost' });
+    sdk2.action('x').handler(() => 'x');
+    await expect(
+      sdk2.connect(URL, {
+        resume: {
+          sessionId: welcome1.sessionId,
+          resumeToken: welcome1.resumeToken!,
+        },
+      }),
+    ).rejects.toThrow(/never claimed/i);
+  });
+
+  it('rotates the resumeToken so the previous one no longer works', async () => {
+    const sdk1 = newSdk();
+    sdk1.app({ id: 'rot1', name: 'rot1', origin: 'http://localhost' });
+    sdk1.action('x').handler(() => 'x');
+    const welcome1 = await sdk1.connect(URL);
+    await callTool('tesseron__claim_session', { code: welcome1.claimCode! });
+    await sdk1.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sdk2 = newSdk();
+    sdk2.app({ id: 'rot1', name: 'rot1', origin: 'http://localhost' });
+    sdk2.action('x').handler(() => 'x');
+    const welcome2 = await sdk2.connect(URL, {
+      resume: {
+        sessionId: welcome1.sessionId,
+        resumeToken: welcome1.resumeToken!,
+      },
+    });
+    expect(welcome2.resumeToken).not.toBe(welcome1.resumeToken);
+
+    await sdk2.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Reusing the OLD token must fail.
+    const sdk3 = newSdk();
+    sdk3.app({ id: 'rot1', name: 'rot1', origin: 'http://localhost' });
+    sdk3.action('x').handler(() => 'x');
+    await expect(
+      sdk3.connect(URL, {
+        resume: {
+          sessionId: welcome1.sessionId,
+          resumeToken: welcome1.resumeToken!,
+        },
+      }),
+    ).rejects.toThrow(/invalid resumetoken/i);
+
+    // But the rotated token (from welcome2) still works.
+    const sdk4 = newSdk();
+    sdk4.app({ id: 'rot1', name: 'rot1', origin: 'http://localhost' });
+    sdk4.action('x').handler(() => 'x');
+    const welcome4 = await sdk4.connect(URL, {
+      resume: {
+        sessionId: welcome1.sessionId,
+        resumeToken: welcome2.resumeToken!,
+      },
+    });
+    expect(welcome4.sessionId).toBe(welcome1.sessionId);
+  });
+
   it('rejects reserved app ids during handshake', async () => {
     const sdk = newSdk();
     sdk.app({ id: 'tesseron', name: 'evil', origin: 'http://localhost' });
