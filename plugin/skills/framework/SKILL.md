@@ -103,7 +103,7 @@ Pick the reference file that matches the task. Each is loaded only when read.
 | Handle errors — codes, subclasses, `instanceof` patterns, resume failures | [references/errors.md](references/errors.md) |
 | Configure the gateway — env vars, origin allowlist, tool surface modes, multi-app | [references/gateway.md](references/gateway.md) |
 | Write unit/integration tests with mock transports and context | [references/testing.md](references/testing.md) |
-| Lay out a new project — `package.json`, `tsconfig.json`, vite config, versions | [references/project-structure.md](references/project-structure.md) |
+| Tesseron-specific structural rules — which `@tesseron/*` package per stack, where `tesseron.app(...)` goes, `app.id` rules, version lockstep, multi-app layout | [references/project-structure.md](references/project-structure.md) |
 
 When a concept is unclear, start from the user's verb: *add an action* → actions, *push a live value* → resources, *ask the LLM to pick something* → context (`ctx.sample`), *let the user confirm* → context (`ctx.confirm` / `ctx.elicit`), *my session died on reload* → transports (resume).
 
@@ -129,9 +129,11 @@ Follow these defaults unless the project says otherwise. The reference files go 
 
 **In React, hooks register once at mount and cleanup on unmount.** Pass a fresh handler closure on every render — the hook stores it in a ref. `useCallback` / `useMemo` around the handler is unnecessary. Put `useTesseronConnection(...)` at the app root, not per-component.
 
-## When the user is starting from nothing
+## When the user wants to add Tesseron to a project
 
-Scaffolding a brand-new Tesseron app (fresh directory, `package.json`, first action, vite or tsc wiring) is handled by the sibling skill `new-app`. Suggest it when the user says "new project", "start from scratch", "scaffold", or equivalent.
+Delegate to the sibling `tesseron-dev` skill. It handles picking the right `@tesseron/*` consumer package, installing it with the project's existing package manager, and inserting the canonical Tesseron API (`tesseron.app(...)` + one action + one resource + `tesseron.connect()`) at module scope of the entry point.
+
+Project creation itself (scaffolding `package.json`, `tsconfig.json`, bundler config, picking framework versions) is outside Tesseron's scope — the user uses whichever upstream scaffolder or framework-specific skill they prefer. `tesseron-dev` works the same way whether the project was created five seconds ago or five years ago.
 
 ## When the user wants to understand an existing codebase
 

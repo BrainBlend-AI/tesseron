@@ -1,427 +1,89 @@
 # Project structure
 
+Scoped to **Tesseron-specific** structural decisions only. Project scaffolding (`package.json`, `tsconfig.json`, bundler config, `.gitignore`, package-manager choice, framework version pins, and any framework-specific idioms) is outside Tesseron's scope — those decisions belong to the upstream scaffolder for the framework, or to a skill that specializes in that framework.
+
+For integrating Tesseron into a project, see the sibling `tesseron-dev` skill.
+
 ## Contents
-- Stack choices
-- Vanilla TypeScript + Vite (browser)
-- React + Vite
-- Headless Node service
-- Express + Tesseron hybrid
-- `package.json` templates (with pinned versions)
-- `tsconfig.json` baseline
-- `.gitignore` baseline
-- Multi-package / monorepo layout
-- Common mistakes
-
-## Stack choices
-
-Tesseron is framework-agnostic. The four canonical shapes:
-
-| Stack | Package | When |
-|---|---|---|
-| Vanilla TS + Vite | `@tesseron/web` | Simplest browser app; no framework |
-| React + Vite | `@tesseron/react` | Component-scoped actions/resources; hook ergonomics |
-| Svelte / Vue + Vite | `@tesseron/web` | Use the web singleton from setup/$effect blocks |
-| Headless Node | `@tesseron/server` | Backend service, CLI, daemon, MCP tool provider without a UI |
-| HTTP + Tesseron hybrid | `@tesseron/server` + express/fastify | Service that serves HTTP AND exposes Claude-invocable actions |
-
-## Vanilla TypeScript + Vite (browser)
-
-```
-my-app/
-├── src/
-│   ├── index.html
-│   └── main.ts
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
-```
-
-**`src/index.html`:**
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>My Tesseron App</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
-  </body>
-</html>
-```
-
-**`src/main.ts`:**
-
-```ts
-import { tesseron } from '@tesseron/web';
-import { z } from 'zod';
-
-tesseron.app({
-  id: 'my_app',
-  name: 'My Tesseron App',
-  description: 'A web app driven by Claude.',
-});
-
-let counter = 0;
-
-tesseron
-  .action('increment')
-  .describe('Increment the counter. Returns the new value.')
-  .input(z.object({ by: z.number().int().default(1) }))
-  .output(z.object({ value: z.number().int() }))
-  .handler(({ by }) => ({ value: (counter += by) }));
-
-tesseron
-  .resource('counter')
-  .describe('Current counter value.')
-  .output(z.number().int())
-  .read(() => counter);
-
-const welcome = await tesseron.connect();
-console.log(`Claim code: ${welcome.claimCode}`);
-```
-
-## React + Vite
-
-```
-my-react-app/
-├── src/
-│   ├── index.html
-│   ├── main.tsx
-│   ├── App.tsx
-│   └── Todos.tsx
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
-```
-
-**`src/main.tsx`:**
-
-```tsx
-import { createRoot } from 'react-dom/client';
-import { App } from './App';
-
-createRoot(document.getElementById('app')!).render(<App />);
-```
-
-**`src/App.tsx`:**
-
-```tsx
-import { useTesseronConnection } from '@tesseron/react';
-import { Todos } from './Todos';
-
-export function App() {
-  const conn = useTesseronConnection();
-
-  if (conn.status === 'error') return <div>Error: {conn.error?.message}</div>;
-  if (conn.claimCode) return <div>Say to Claude: <code>claim session {conn.claimCode}</code></div>;
-
-  return <Todos />;
-}
-```
-
-**`src/Todos.tsx`:**
-
-```tsx
-import { useState } from 'react';
-import { useTesseronAction, useTesseronResource } from '@tesseron/react';
-import { z } from 'zod';
-
-type Todo = { id: string; text: string; done: boolean };
-
-export function Todos() {
-  const [todos, setTodos] = useState<Todo[]>([]);
-
-  useTesseronAction('addTodo', {
-    description: 'Add a new todo item.',
-    input: z.object({ text: z.string().min(1) }),
-    handler: ({ text }) => {
-      const todo = { id: crypto.randomUUID(), text, done: false };
-      setTodos((c) => [...c, todo]);
-      return todo;
-    },
-  });
-
-  useTesseronResource('todos', () => todos);
-
-  return (
-    <ul>
-      {todos.map((t) => <li key={t.id}>{t.text}</li>)}
-    </ul>
-  );
-}
-```
-
-## Headless Node service
-
-```
-my-node-service/
-├── src/
-│   └── index.ts
-├── package.json
-└── tsconfig.json
-```
-
-**`src/index.ts`:**
-
-```ts
-import { tesseron } from '@tesseron/server';
-import { z } from 'zod';
-
-tesseron.app({
-  id: 'my_service',
-  name: 'My Tesseron Service',
-  description: 'A headless Node service driven by Claude.',
-});
-
-const store = new Map<string, unknown>();
-
-tesseron
-  .action('set')
-  .describe('Store a value under a key.')
-  .input(z.object({ key: z.string().min(1), value: z.unknown() }))
-  .handler(({ key, value }) => {
-    store.set(key, value);
-    return { ok: true, size: store.size };
-  });
-
-tesseron
-  .action('get')
-  .describe('Retrieve a stored value by key.')
-  .annotate({ readOnly: true })
-  .input(z.object({ key: z.string().min(1) }))
-  .handler(({ key }) => ({ key, value: store.get(key) ?? null }));
-
-tesseron
-  .resource('keys')
-  .describe('All stored keys.')
-  .output(z.array(z.string()))
-  .read(() => [...store.keys()]);
-
-const welcome = await tesseron.connect();
-console.log(`Connected. Claim code: ${welcome.claimCode}`);
-```
-
-Run with `node --experimental-strip-types src/index.ts` on Node 22+, or compile with `tsc` and run the JS.
-
-## Express + Tesseron hybrid
-
-Pair an HTTP API with a Tesseron WebSocket surface against the same in-memory state:
-
-```ts
-import express from 'express';
-import { tesseron } from '@tesseron/server';
-import { z } from 'zod';
-
-const todos = new Map<string, { id: string; text: string; done: boolean }>();
-const app = express();
-app.use(express.json());
-
-// HTTP surface
-app.get('/todos', (_req, res) => res.json([...todos.values()]));
-app.post('/todos', (req, res) => {
-  const id = crypto.randomUUID();
-  const todo = { id, text: req.body.text, done: false };
-  todos.set(id, todo);
-  res.status(201).json(todo);
-});
-
-// Tesseron surface — same state
-tesseron.app({ id: 'todos', name: 'Todos', description: 'HTTP + Claude todos.' });
-tesseron
-  .action('addTodo')
-  .describe('Add a todo.')
-  .input(z.object({ text: z.string().min(1) }))
-  .handler(({ text }) => {
-    const id = crypto.randomUUID();
-    const todo = { id, text, done: false };
-    todos.set(id, todo);
-    return todo;
-  });
-tesseron
-  .resource('todos')
-  .describe('All todos.')
-  .read(() => [...todos.values()]);
-
-app.listen(3000, async () => {
-  const welcome = await tesseron.connect();
-  console.log(`HTTP on :3000. Claim code: ${welcome.claimCode}`);
-});
-```
-
-## `package.json` templates
-
-### Vanilla browser app
-
-```json
-{
-  "name": "my-tesseron-app",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@tesseron/web": "^1.0.1",
-    "zod": "^3.24.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.7.0",
-    "vite": "^5.4.0"
-  }
-}
-```
-
-### React app
-
-```json
-{
-  "name": "my-tesseron-react-app",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@tesseron/react": "^1.0.1",
-    "react": "^18.3.0",
-    "react-dom": "^18.3.0",
-    "zod": "^3.24.0"
-  },
-  "devDependencies": {
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "typescript": "^5.7.0",
-    "vite": "^5.4.0"
-  }
-}
-```
-
-### Node service
-
-```json
-{
-  "name": "my-tesseron-service",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "node --watch --experimental-strip-types src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@tesseron/server": "^1.0.1",
-    "zod": "^3.24.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
-  }
-}
-```
-
-Pin `@tesseron/*` packages to the same minor version — they're released in lockstep. Zod 3 is the most widely tested; Zod 4 works and unlocks `z.toJSONSchema(...)`.
-
-## `tsconfig.json` baseline
-
-### Browser app
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "lib": ["ES2022", "DOM"],
-    "moduleResolution": "bundler",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "noEmit": true,
-    "jsx": "react-jsx"
-  },
-  "include": ["src"]
-}
-```
-
-Drop `"jsx": "react-jsx"` if you're not using React.
-
-### Node service
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "lib": ["ES2022"],
-    "moduleResolution": "bundler",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "outDir": "dist",
-    "declaration": true,
-    "sourceMap": true
-  },
-  "include": ["src"]
-}
-```
-
-## `.gitignore` baseline
-
-```
-node_modules/
-dist/
-.cache/
-.env
-.DS_Store
-```
-
-Never commit `.env` — it may contain a gateway allowlist or downstream API keys. Always keep `.env.example` (with placeholder values) under version control.
-
-## Multi-package / monorepo layout
-
-For a frontend + backend that share Tesseron types or handlers, a small workspace keeps things tidy:
+
+- The three consumer packages
+- Where `tesseron.app(...)` goes
+- `app.id` rules
+- `@tesseron/*` version lockstep
+- Multi-app projects and tool-name collisions
+- Monorepo layout for shared schemas
+
+## The three consumer packages
+
+Tesseron ships three consumer packages (plus `@tesseron/core` for protocol types — not a consumer surface — and `@tesseron/mcp` for the bundled gateway binary — also not a consumer surface).
+
+| Package | Scope |
+|---|---|
+| `@tesseron/react` | React projects. Exports the hook API (`useTesseronAction`, `useTesseronResource`, `useTesseronConnection`) alongside the singleton. Tesseron ships framework-specific ergonomics here because React's hook model warrants them. |
+| `@tesseron/server` | Node processes — headless services, CLIs, long-running backends. |
+| `@tesseron/web` | Any other browser context. A framework-neutral singleton — the same API serves vanilla JS and any browser framework without a Tesseron-specific adapter. Tesseron does not ship framework-specific code for these; the singleton is called from whatever module scope or startup hook the framework provides. |
+
+Pick exactly one `@tesseron/*` package per process. They are singletons.
+
+## Where `tesseron.app(...)` goes
+
+`tesseron.app(...)` must run exactly once, at module scope, before the first `tesseron.action(...)` / `tesseron.resource(...)` / `tesseron.connect()` call. Beyond that, *which file* is the project's entry point is the framework's convention, not Tesseron's — Tesseron only asks that the call is at module scope so it runs once per process.
+
+- **React** (`@tesseron/react`): put `tesseron.app(...)` at module scope in the main entry file that bootstraps the React tree. Do not call it inside a component — re-mounting would re-register the manifest.
+- **Server** (`@tesseron/server`): put `tesseron.app(...)` at module scope in the Node entry file.
+- **Browser-non-React** (`@tesseron/web`): put `tesseron.app(...)` at module scope in whichever file the framework bootstraps from. The singleton is framework-neutral; the call runs at import time. `tesseron.connect()` can be awaited at module scope or scheduled inside whatever startup hook the framework exposes.
+
+## `app.id` rules
+
+- **Always `snake_case`** — lowercase letters, digits, and underscores. No spaces, dashes, slashes, dots.
+- **Stable.** The MCP gateway prefixes every action with `<app_id>__<action_name>` (e.g. `todos__addTodo`). Changing `app.id` breaks any saved tool lists or agent prompts that reference the prefix.
+- **Unique per connected app.** In a multi-app gateway session, two apps with the same `app.id` produce colliding tool names.
+- Derive a default from `package.json` `name`, normalized to `snake_case`.
+
+## `@tesseron/*` version lockstep
+
+All `@tesseron/*` packages — `core`, `web`, `server`, `react`, `mcp` — are released together. Within a single project, pin them to the **same minor version** or to a `^1.0.0`-style range that resolves them together. Mismatched minor versions cause subtle protocol drift:
+
+- A `@tesseron/web@^1.1.0` client speaking to a `@tesseron/mcp@^1.0.x` gateway may use protocol methods the gateway doesn't route.
+- The SDK's TypeScript types come from `@tesseron/core`, so if `@tesseron/core` resolves to a different version than the transport package, types can mismatch runtime behavior.
+
+`@tesseron/core` is not a direct dependency — the other packages re-export from it. Do not install `@tesseron/core` explicitly unless you need the low-level protocol types for a custom transport or test harness.
+
+## Multi-app projects and tool-name collisions
+
+One process, one `app.id`. If an application needs to expose multiple "surfaces" to the agent (e.g. an admin surface and a customer surface), that's two separate processes with two separate `app.id` values, each calling `tesseron.connect()` independently.
+
+When two apps connect to the same gateway session, their tools are prefixed independently: `shop_web__refundOrder` and `shop_admin__refundOrder` coexist without clashing. But if both use `app.id = "shop"`, the gateway's tool list has two `shop__refundOrder` entries and routing becomes undefined.
+
+## Monorepo layout for shared schemas
+
+Splitting a Tesseron-using project into multiple workspaces is worth doing only for these reasons:
+
+- **Shared schemas.** A frontend and a backend both need the same Zod/Valibot/Typebox input definitions. Extract them into a shared workspace package; both apps import from it.
+- **Shared handlers.** Handler logic lives in a domain package that both the HTTP API and the Tesseron surface call into.
+- **Multiple Tesseron apps** that ship independently but talk to the same gateway during development.
+
+A minimal shape:
 
 ```
 my-product/
-├── package.json          # workspaces: ["apps/*", "packages/*"]
-├── pnpm-workspace.yaml
 ├── apps/
-│   ├── web/              # React app with @tesseron/react
-│   └── service/          # Node service with @tesseron/server
-├── packages/
-│   └── shared/           # shared Zod schemas, types, helpers
-└── tsconfig.base.json
+│   ├── web/              # one Tesseron app, app.id: "product_web"
+│   └── service/          # another Tesseron app, app.id: "product_service"
+└── packages/
+    └── shared/           # shared schemas, domain types, pure handlers
 ```
 
-Both apps announce *different* `app.id` values (`product_web`, `product_service`) so their actions don't collide in the MCP tool list.
+The Tesseron-specific rule is the `app.id` split (to avoid tool-name collisions) and the shared-package boundary for schemas. Workspace tooling, `tsconfig` inheritance, build orchestration, and package-manager choice are all outside Tesseron's scope.
 
-## Common mistakes
+## Tesseron-specific anti-patterns
 
-- **Mixing CommonJS and ESM in the same package.** Tesseron is ESM-first; set `"type": "module"` in `package.json` and let imports resolve cleanly.
-- **Forgetting `"jsx": "react-jsx"` in a React project's tsconfig.** Compile errors on every TSX file.
-- **Checking in `node_modules/`, `dist/`, or `.env`.** `.gitignore` them.
-- **Pinning `@tesseron/*` packages to different minor versions.** They're released in lockstep; mismatches cause subtle protocol drift.
-- **Picking Zod version 3 when `z.toJSONSchema(...)` is needed.** Zod 4 exports it directly; on Zod 3, use the `zod-to-json-schema` community package or pass the second argument as a hand-written object.
-- **Hardcoding gateway host/port in code instead of reading `DEFAULT_GATEWAY_URL` / env vars.** A future gateway location change requires editing every import.
-- **Running a gateway in a CI environment without setting `TESSERON_HOST=127.0.0.1` explicitly.** Some CI runners bind to all interfaces by default — spell out localhost to be safe.
+- **Two `@tesseron/*` packages in the same process.** Only one singleton should register actions and connect.
+- **`tesseron.app(...)` inside a component or inside a function called per request.** It must run exactly once at module scope.
+- **`tesseron.connect()` before `tesseron.app(...)`.** Connect throws without an app manifest.
+- **Sharing `app.id` across two surfaces.** Tool-name collisions at the gateway.
+- **Pinning `@tesseron/*` packages to different minor versions.** Protocol drift.
+- **Importing from package internals (`@tesseron/core/dist/...`).** Not public API.
+- **Hardcoding `ws://127.0.0.1:7475`.** Use `DEFAULT_GATEWAY_URL` from the transport package.
+
+Beyond these, Tesseron has no opinion on project structure.

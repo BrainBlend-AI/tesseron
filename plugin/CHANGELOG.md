@@ -27,9 +27,9 @@ This release also expands the plugin from a gateway-only install to a full devel
   - `errors.md` — `TesseronErrorCode` table, subclass hierarchy, `instanceof` patterns, never-swallow rules.
   - `gateway.md` — `@tesseron/mcp` env vars (`TESSERON_PORT`, `TESSERON_HOST`, `TESSERON_ORIGIN_ALLOWLIST`, `TESSERON_TOOL_SURFACE`), tool naming (`<app_id>__<action>`), tool surface modes, meta tools, multi-app sessions.
   - `testing.md` — Vitest patterns, mocking `ActionContext`, capturing-registry pattern, in-memory transport round-trips, session-resume tests.
-  - `project-structure.md` — Recommended layouts for vanilla-ts / React / Node / Express stacks, pinned versions, `tsconfig.json` baselines.
+  - `project-structure.md` — **Tesseron-specific** structural rules only: the three consumer packages (`@tesseron/react` for React, `@tesseron/server` for Node, `@tesseron/web` for any other browser context), where `tesseron.app(...)` goes, `app.id` rules, `@tesseron/*` version lockstep, multi-app tool-name collisions, and the monorepo layout for shared schemas. Explicitly scoped away from project scaffolding (`package.json`, `tsconfig.json`, bundler config, framework version pins, framework-specific idioms) — none of that is Tesseron's responsibility.
 
-- **`new-app` skill** (`skills/new-app/SKILL.md`) — slash-invokable scaffolder (`/tesseron:new-app`) with `disable-model-invocation: true` and `argument-hint: [project-name]`. Four short questions (name, stack, domain, validator) produce a complete, type-checked project.
+- **`tesseron-dev` skill** (`skills/tesseron-dev/SKILL.md`) — auto-triggered when the user asks to add Tesseron to a project (existing, or one just scaffolded by another tool). Strictly Tesseron-scoped: picks one of the three consumer packages (`@tesseron/react` for React, `@tesseron/server` for Node, `@tesseron/web` for any other browser context), installs it with the project's existing package manager (pnpm / npm / yarn / bun), ensures a Standard-Schema validator is present (defaults to `zod` if none), and inserts the canonical Tesseron API — `tesseron.app(...)` + at least one action + at least one resource + `tesseron.connect(...)` — at module scope of the entry point. Does not create projects, scaffold build tooling, pick framework versions, or template framework-specific idioms. Creating projects is outside Tesseron's scope.
 
 - **`tesseron-explorer` subagent** (`agents/tesseron-explorer.md`) — isolated-context read-only subagent that maps an existing Tesseron codebase: apps, actions, resources, context-method usage, transports, React hooks, session lifecycle. Returns a compact architecture summary with `file:line` references.
 
@@ -39,7 +39,7 @@ This release also expands the plugin from a gateway-only install to a full devel
 
 - Plugin version scheme changed from independent pre-1.0 to SDK lockstep. The plugin is now `1.0.2`, matching `@tesseron/core`, `/web`, `/server`, `/react`, `/mcp`.
 - `marketplace.json` and `plugin.json`: version `0.1.0` → `1.0.2`; descriptions expanded to cover the new surface alongside the gateway.
-- `README.md` rewritten to lead with "what you get" (gateway + skills + subagents + scaffolder), with separate sections for gateway usage and skill-driven workflows.
+- `README.md` rewritten to lead with "what you get" (gateway + `framework` skill + `tesseron-dev` skill + explorer/reviewer subagents), with separate sections for gateway usage and skill-driven workflows.
 
 ### Unchanged
 
