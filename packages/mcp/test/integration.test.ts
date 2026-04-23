@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
+import { TesseronError, TesseronErrorCode, type TesseronStructuredError } from '@tesseron/core';
 import { ServerTesseronClient } from '@tesseron/server';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { McpAgentBridge, TesseronGateway } from '../src/index.js';
@@ -56,6 +57,7 @@ async function listToolNames(): Promise<string[]> {
 interface CallOutcome {
   text: string;
   isError: boolean;
+  structuredContent?: TesseronStructuredError;
 }
 
 async function callTool(name: string, args: unknown): Promise<CallOutcome> {
@@ -64,7 +66,14 @@ async function callTool(name: string, args: unknown): Promise<CallOutcome> {
     CallToolResultSchema,
   );
   const text = result.content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('');
-  return { text, isError: result.isError === true };
+  return {
+    text,
+    isError: result.isError === true,
+    // The MCP SDK types this as an opaque Record; our gateway only emits
+    // TesseronStructuredError-shaped payloads, so the cast enables typed
+    // access to .code and .data in assertions.
+    structuredContent: result.structuredContent as TesseronStructuredError | undefined,
+  };
 }
 
 async function setupAndClaim(
@@ -164,6 +173,7 @@ describe('Tesseron MCP integration', () => {
     const result = await callTool('val1__greet', { name: 42 });
     expect(result.isError).toBe(true);
     expect(result.text.toLowerCase()).toContain('invalid input');
+    expect(result.structuredContent?.code).toBe(TesseronErrorCode.InputValidation);
   });
 
   it('surfaces handler errors with their original message', async () => {
@@ -176,6 +186,26 @@ describe('Tesseron MCP integration', () => {
     const result = await callTool('err1__boom', {});
     expect(result.isError).toBe(true);
     expect(result.text).toContain('something broke in the handler');
+    // Plain handler throws become InternalError via the dispatcher's
+    // toErrorPayload fallback. HandlerError is reserved for SDK-internal
+    // schema failures (sampling result, elicitation content, strict output).
+    expect(result.structuredContent?.code).toBe(TesseronErrorCode.InternalError);
+  });
+
+  it('propagates TesseronError.data into structuredContent', async () => {
+    // Guards the conditional `.data` spread in errorResult: .code alone would
+    // pass even if a refactor silently dropped the data branch.
+    const issues = [{ message: 'name required', path: ['name'] }];
+    await setupAndClaim('propagate1', (s) => {
+      s.action('boom').handler(() => {
+        throw new TesseronError(TesseronErrorCode.InputValidation, 'bad input', issues);
+      });
+    });
+
+    const result = await callTool('propagate1__boom', {});
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.code).toBe(TesseronErrorCode.InputValidation);
+    expect(result.structuredContent?.data).toEqual(issues);
   });
 
   it('rejects unknown claim codes', async () => {
