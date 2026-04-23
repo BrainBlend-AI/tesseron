@@ -423,6 +423,32 @@ describe('Tesseron MCP integration', () => {
     expect(welcome4.sessionId).toBe(welcome1.sessionId);
   });
 
+  it('refuses a cross-app resume attempt (app B cannot hijack app A session)', async () => {
+    // Security boundary: the app_id carried in the resume params must match
+    // the app id of the zombie being resumed. Without this check, any app
+    // that learned another app's sessionId + resumeToken (via shared storage,
+    // a bug, or a leak) could inherit its claimed MCP tool surface.
+    const sdkA = newSdk();
+    sdkA.app({ id: 'owner_app', name: 'owner_app', origin: 'http://localhost' });
+    sdkA.action('x').handler(() => 'x');
+    const welcomeA = await sdkA.connect(URL);
+    await callTool('tesseron__claim_session', { code: welcomeA.claimCode! });
+    await sdkA.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const sdkB = newSdk();
+    sdkB.app({ id: 'hijacker_app', name: 'hijacker_app', origin: 'http://localhost' });
+    sdkB.action('x').handler(() => 'x');
+    await expect(
+      sdkB.connect(URL, {
+        resume: {
+          sessionId: welcomeA.sessionId,
+          resumeToken: welcomeA.resumeToken!,
+        },
+      }),
+    ).rejects.toThrow(/not "hijacker_app"/i);
+  });
+
   it('rejects reserved app ids during handshake', async () => {
     const sdk = newSdk();
     sdk.app({ id: 'tesseron', name: 'evil', origin: 'http://localhost' });

@@ -158,6 +158,12 @@ export class TesseronGateway extends EventEmitter {
    * rejoin them with `tesseron/resume`. See {@link GatewayOptions.resumeTtlMs}.
    */
   private readonly zombieSessions = new Map<string, ZombieSession>();
+  /**
+   * Flipped true by {@link stop} so in-flight `ws.on('close')` events queued by
+   * `ws.close()` during shutdown skip re-inserting zombies into the map we
+   * just cleared. Reset by {@link start} so the gateway can be restarted.
+   */
+  private stopped = false;
   private samplingHandler?: SamplingHandler;
   private elicitationHandler?: ElicitationHandler;
   private agentCapabilities: AgentCapabilityInfo = { ...DEFAULT_AGENT_CAPABILITIES };
@@ -168,6 +174,7 @@ export class TesseronGateway extends EventEmitter {
 
   /** Binds the WebSocket server. Resolves when `listening` fires; rejects on bind error. */
   async start(): Promise<void> {
+    this.stopped = false;
     const port = this.options.port ?? DEFAULT_GATEWAY_PORT;
     const host = this.options.host ?? DEFAULT_GATEWAY_HOST;
     const allowlist = new Set(this.options.originAllowlist ?? []);
@@ -202,6 +209,10 @@ export class TesseronGateway extends EventEmitter {
 
   /** Closes all sessions and shuts down the WebSocket server. */
   async stop(): Promise<void> {
+    // Mark stopped before closing sockets: ws.close() queues a 'close' event
+    // that runs AFTER this function returns, and without the guard each one
+    // would re-insert a zombie into the map we're about to clear.
+    this.stopped = true;
     for (const session of this.sessions.values()) {
       session.ws.close(1001, 'Gateway shutting down');
     }
@@ -422,9 +433,10 @@ export class TesseronGateway extends EventEmitter {
 
       // Zombify the session so a reconnecting SDK can rejoin via
       // `tesseron/resume` within the TTL. When the feature is disabled
-      // (resumeTtlMs === 0) the session is dropped immediately.
+      // (resumeTtlMs === 0) or the gateway is shutting down, the session
+      // is dropped immediately.
       const resumeTtl = this.options.resumeTtlMs ?? DEFAULT_RESUME_TTL_MS;
-      if (resumeTtl > 0) {
+      if (resumeTtl > 0 && !this.stopped) {
         const closedSession = session;
         const evictTimer = setTimeout(() => {
           this.zombieSessions.delete(closedSession.id);
@@ -526,9 +538,26 @@ export class TesseronGateway extends EventEmitter {
       const resumeParams = params as ResumeParams;
 
       if (session) {
+        // A well-behaved SDK never does this; it's a programming error, not a
+        // recoverable resume failure. InvalidRequest (not ResumeFailed) so any
+        // SDK fallback-on-ResumeFailed logic doesn't loop on a malformed call.
+        throw new TesseronError(
+          TesseronErrorCode.InvalidRequest,
+          'This socket is already attached to a session. Send tesseron/resume on a fresh connection.',
+        );
+      }
+
+      // Guard against malformed params before they reach Buffer.from below:
+      // a non-string resumeToken (e.g. a large integer) would otherwise
+      // allocate a raw buffer of that size; other shapes throw a raw TypeError
+      // that leaks as a generic InternalError instead of a typed ResumeFailed.
+      if (
+        typeof resumeParams.sessionId !== 'string' ||
+        typeof resumeParams.resumeToken !== 'string'
+      ) {
         throw new TesseronError(
           TesseronErrorCode.ResumeFailed,
-          'This socket is already attached to a session. Send tesseron/resume on a fresh connection.',
+          'Invalid tesseron/resume request: sessionId and resumeToken must be strings.',
         );
       }
 
@@ -549,7 +578,17 @@ export class TesseronGateway extends EventEmitter {
         );
       }
 
-      validateAppId(resumeParams.app.id);
+      // Remap validateAppId's plain Error into the typed ResumeFailed the
+      // ConnectOptions.resume contract promises, so SDK fallback logic that
+      // branches on err.code === ResumeFailed catches malformed app ids too.
+      try {
+        validateAppId(resumeParams.app.id);
+      } catch (err) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          err instanceof Error ? err.message : 'Invalid app id on resume.',
+        );
+      }
 
       const zombie = this.zombieSessions.get(resumeParams.sessionId);
       if (!zombie) {
