@@ -447,14 +447,14 @@ export class TesseronGateway extends EventEmitter {
 
       // Zombify the session so a reconnecting SDK can rejoin via
       // `tesseron/resume` within the TTL. When the feature is disabled
-      // (resumeTtlMs === 0) or the gateway is shutting down, the session
-      // is dropped immediately.
+      // (resumeTtlMs <= 0 or maxZombies <= 0) or the gateway is shutting
+      // down, the session is dropped immediately.
       const resumeTtl = this.options.resumeTtlMs ?? DEFAULT_RESUME_TTL_MS;
-      if (resumeTtl > 0 && !this.stopped) {
+      const maxZombies = this.options.maxZombies ?? DEFAULT_MAX_ZOMBIES;
+      if (resumeTtl > 0 && maxZombies > 0 && !this.stopped) {
         // Cap the map to prevent a connect/disconnect flood from piling up
         // zombies until their TTLs elapse. Map iteration order is insertion
         // order, so the first key is the oldest entry.
-        const maxZombies = this.options.maxZombies ?? DEFAULT_MAX_ZOMBIES;
         if (this.zombieSessions.size >= maxZombies) {
           const oldestId = this.zombieSessions.keys().next().value;
           if (oldestId !== undefined) {
@@ -576,17 +576,25 @@ export class TesseronGateway extends EventEmitter {
         );
       }
 
-      // Guard against malformed params before they reach Buffer.from below:
-      // a non-string resumeToken (e.g. a large integer) would otherwise
-      // allocate a raw buffer of that size; other shapes throw a raw TypeError
-      // that leaks as a generic InternalError instead of a typed ResumeFailed.
+      // Guard every field the handler dereferences below. Without this, a
+      // malformed resume (missing `app`, non-string `resumeToken`, absent
+      // `actions`) bails out as a raw TypeError — which the dispatcher
+      // surfaces as a generic InternalError and the SDK's ResumeFailed
+      // fallback path never sees. Validate once, up front, typed.
       if (
         typeof resumeParams.sessionId !== 'string' ||
-        typeof resumeParams.resumeToken !== 'string'
+        typeof resumeParams.resumeToken !== 'string' ||
+        typeof resumeParams.protocolVersion !== 'string' ||
+        !resumeParams.app ||
+        typeof resumeParams.app.id !== 'string' ||
+        !Array.isArray(resumeParams.actions) ||
+        !Array.isArray(resumeParams.resources) ||
+        !resumeParams.capabilities ||
+        typeof resumeParams.capabilities !== 'object'
       ) {
         throw new TesseronError(
           TesseronErrorCode.ResumeFailed,
-          'Invalid tesseron/resume request: sessionId and resumeToken must be strings.',
+          'Invalid tesseron/resume request: expected { protocolVersion, sessionId, resumeToken, app, actions, resources, capabilities }.',
         );
       }
 
@@ -664,6 +672,14 @@ export class TesseronGateway extends EventEmitter {
       this.zombieSessions.delete(zombie.id);
 
       if (origin && resumeParams.app.origin !== origin) {
+        // The socket's Origin header is the authoritative value (it's what the
+        // gateway already allowlisted during the WS upgrade). Log the mismatch
+        // against the zombie's stored origin — a drift here can indicate a
+        // misconfigured build (staging bundle dialing a prod gateway, or a
+        // tenant swap) and otherwise leaves no forensic trail.
+        logToStderr(
+          `[tesseron] resume origin mismatch for session ${zombie.id}: stored=${zombie.app.origin} declared=${resumeParams.app.origin} socket=${origin} — rewriting to socket origin`,
+        );
         resumeParams.app.origin = origin;
       }
 

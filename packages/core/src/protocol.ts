@@ -135,15 +135,22 @@ export interface HelloParams {
  * Result of the `tesseron/hello` handshake (and `tesseron/resume`). Carries the
  * session id, the capabilities the MCP client will honour, the connected
  * agent's identity (filled once a bridge attaches), the `claimCode` the user
- * pastes into their MCP client to link this session (omitted on resume of an
- * already-claimed session), and an opaque `resumeToken` the caller can stash
- * wherever fits their app to rejoin this session after a transport drop.
+ * pastes into their MCP client to link this session, and an opaque
+ * `resumeToken` the caller can stash wherever fits their app to rejoin this
+ * session after a transport drop.
  */
 export interface WelcomeResult {
   sessionId: string;
   protocolVersion: string;
   capabilities: TesseronCapabilities;
   agent: AgentIdentity;
+  /**
+   * 6-character pairing code the user enters in their MCP client. Present on
+   * every `tesseron/hello` response. Always **absent** on a successful
+   * `tesseron/resume` response: the gateway only permits resume for
+   * already-claimed sessions, so re-issuing a pairing code would be a no-op
+   * at best and a UI confusion at worst.
+   */
   claimCode?: string;
   /**
    * Server-issued token that, together with {@link WelcomeResult.sessionId},
@@ -186,8 +193,9 @@ export interface ResumeParams extends HelloParams {
 
 /**
  * Result of the `tesseron/resume` request. Same shape as {@link WelcomeResult}
- * — `sessionId` matches the param, `resumeToken` is rotated, `claimCode` is
- * omitted if the session was already claimed.
+ * — `sessionId` matches the param, `resumeToken` is rotated, and `claimCode`
+ * is always absent (the gateway only permits resume for already-claimed
+ * sessions, so there is no pairing code to re-issue).
  */
 export type ResumeResult = WelcomeResult;
 

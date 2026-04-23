@@ -716,3 +716,253 @@ describe('Tool surface modes', () => {
     }
   });
 });
+
+describe('Resume options', () => {
+  async function buildResumeBridge(
+    port: number,
+    opts: { resumeTtlMs?: number; maxZombies?: number } = {},
+  ): Promise<{
+    gateway: TesseronGateway;
+    url: string;
+    agentClient: Client;
+    newSdk: () => ServerTesseronClient;
+    cleanup: () => Promise<void>;
+  }> {
+    const gw = new TesseronGateway({ port, ...opts });
+    await gw.start();
+    const br = new McpAgentBridge({ gateway: gw });
+    const [agentSide, gatewaySide] = InMemoryTransport.createLinkedPair();
+    await br.connect(gatewaySide);
+    const c = new Client({ name: 'resume-opts-test', version: '0.0.0' });
+    await c.connect(agentSide);
+    const sdks: ServerTesseronClient[] = [];
+    return {
+      gateway: gw,
+      url: `ws://127.0.0.1:${port}`,
+      agentClient: c,
+      newSdk: () => {
+        const sdk = new ServerTesseronClient();
+        sdks.push(sdk);
+        return sdk;
+      },
+      cleanup: async () => {
+        await Promise.all(sdks.map((s) => s.disconnect().catch(() => {})));
+        await c.close().catch(() => {});
+        await gw.stop().catch(() => {});
+      },
+    };
+  }
+
+  async function claim(agentClient: Client, code: string): Promise<void> {
+    const r = await agentClient.request(
+      { method: 'tools/call', params: { name: 'tesseron__claim_session', arguments: { code } } },
+      CallToolResultSchema,
+    );
+    expect(r.isError).toBeFalsy();
+  }
+
+  it('evicts zombies past their TTL (resume after TTL fails with no-resumable-session)', async () => {
+    const { url, agentClient, newSdk, cleanup } = await buildResumeBridge(7810, {
+      resumeTtlMs: 150,
+    });
+    try {
+      const sdk1 = newSdk();
+      sdk1.app({ id: 'ttl1', name: 'ttl1', origin: 'http://localhost' });
+      sdk1.action('x').handler(() => 'x');
+      const welcome1 = await sdk1.connect(url);
+      await claim(agentClient, welcome1.claimCode!);
+      await sdk1.disconnect();
+      // Wait past the TTL so the eviction timer fires.
+      await new Promise((r) => setTimeout(r, 300));
+
+      const sdk2 = newSdk();
+      sdk2.app({ id: 'ttl1', name: 'ttl1', origin: 'http://localhost' });
+      sdk2.action('x').handler(() => 'x');
+      await expect(
+        sdk2.connect(url, {
+          resume: {
+            sessionId: welcome1.sessionId,
+            resumeToken: welcome1.resumeToken!,
+          },
+        }),
+      ).rejects.toThrow(/no resumable session/i);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('resumeTtlMs: 0 disables zombification; immediate resume fails', async () => {
+    const { url, agentClient, newSdk, cleanup } = await buildResumeBridge(7811, {
+      resumeTtlMs: 0,
+    });
+    try {
+      const sdk1 = newSdk();
+      sdk1.app({ id: 'ttl0', name: 'ttl0', origin: 'http://localhost' });
+      sdk1.action('x').handler(() => 'x');
+      const welcome1 = await sdk1.connect(url);
+      await claim(agentClient, welcome1.claimCode!);
+      await sdk1.disconnect();
+      await new Promise((r) => setTimeout(r, 100));
+
+      const sdk2 = newSdk();
+      sdk2.app({ id: 'ttl0', name: 'ttl0', origin: 'http://localhost' });
+      sdk2.action('x').handler(() => 'x');
+      await expect(
+        sdk2.connect(url, {
+          resume: {
+            sessionId: welcome1.sessionId,
+            resumeToken: welcome1.resumeToken!,
+          },
+        }),
+      ).rejects.toThrow(/no resumable session/i);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('maxZombies: 0 disables zombification entirely', async () => {
+    // Regression guard: before the fix, maxZombies=0 was silently ignored —
+    // the cap-eviction branch found an empty map and fell through to insert
+    // the new zombie anyway, so the cap did nothing.
+    const { url, agentClient, newSdk, cleanup } = await buildResumeBridge(7812, {
+      maxZombies: 0,
+    });
+    try {
+      const sdk1 = newSdk();
+      sdk1.app({ id: 'maxz0', name: 'maxz0', origin: 'http://localhost' });
+      sdk1.action('x').handler(() => 'x');
+      const welcome1 = await sdk1.connect(url);
+      await claim(agentClient, welcome1.claimCode!);
+      await sdk1.disconnect();
+      await new Promise((r) => setTimeout(r, 100));
+
+      const sdk2 = newSdk();
+      sdk2.app({ id: 'maxz0', name: 'maxz0', origin: 'http://localhost' });
+      sdk2.action('x').handler(() => 'x');
+      await expect(
+        sdk2.connect(url, {
+          resume: {
+            sessionId: welcome1.sessionId,
+            resumeToken: welcome1.resumeToken!,
+          },
+        }),
+      ).rejects.toThrow(/no resumable session/i);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('maxZombies: 2 evicts the oldest zombie FIFO when the cap is reached', async () => {
+    const { url, agentClient, newSdk, cleanup } = await buildResumeBridge(7813, {
+      maxZombies: 2,
+    });
+    try {
+      async function spawnAndDrop(id: string) {
+        const sdk = newSdk();
+        sdk.app({ id, name: id, origin: 'http://localhost' });
+        sdk.action('x').handler(() => 'x');
+        const w = await sdk.connect(url);
+        await claim(agentClient, w.claimCode!);
+        await sdk.disconnect();
+        await new Promise((r) => setTimeout(r, 60));
+        return w;
+      }
+      const wa = await spawnAndDrop('cap_a');
+      const wb = await spawnAndDrop('cap_b');
+      const wc = await spawnAndDrop('cap_c');
+
+      // cap_a was oldest; inserting cap_c should have evicted it.
+      const sdkA2 = newSdk();
+      sdkA2.app({ id: 'cap_a', name: 'cap_a', origin: 'http://localhost' });
+      sdkA2.action('x').handler(() => 'x');
+      await expect(
+        sdkA2.connect(url, {
+          resume: { sessionId: wa.sessionId, resumeToken: wa.resumeToken! },
+        }),
+      ).rejects.toThrow(/no resumable session/i);
+
+      // cap_b and cap_c are still within the cap and must resume.
+      const sdkB2 = newSdk();
+      sdkB2.app({ id: 'cap_b', name: 'cap_b', origin: 'http://localhost' });
+      sdkB2.action('x').handler(() => 'x');
+      const wb2 = await sdkB2.connect(url, {
+        resume: { sessionId: wb.sessionId, resumeToken: wb.resumeToken! },
+      });
+      expect(wb2.sessionId).toBe(wb.sessionId);
+
+      const sdkC2 = newSdk();
+      sdkC2.app({ id: 'cap_c', name: 'cap_c', origin: 'http://localhost' });
+      sdkC2.action('x').handler(() => 'x');
+      const wc2 = await sdkC2.connect(url, {
+        resume: { sessionId: wc.sessionId, resumeToken: wc.resumeToken! },
+      });
+      expect(wc2.sessionId).toBe(wc.sessionId);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects malformed resume params (non-string sessionId) with a typed ResumeFailed', async () => {
+    // Before the consolidated input guard, a non-string sessionId reached
+    // `zombieSessions.get(...)` or `Buffer.from(...)` below and escaped as
+    // an untyped InternalError instead of the ResumeFailed the ConnectOptions
+    // contract promises.
+    const { url, newSdk, cleanup } = await buildResumeBridge(7814);
+    try {
+      const sdk = newSdk();
+      sdk.app({ id: 'bad1', name: 'bad1', origin: 'http://localhost' });
+      sdk.action('x').handler(() => 'x');
+      await expect(
+        sdk.connect(url, {
+          resume: {
+            sessionId: 12345 as unknown as string,
+            resumeToken: 'any-value',
+          },
+        }),
+      ).rejects.toThrow(/invalid tesseron\/resume request/i);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('replaces the session manifest on resume (added tool appears, removed tool disappears)', async () => {
+    const { url, agentClient, newSdk, cleanup } = await buildResumeBridge(7815);
+    try {
+      async function listTools() {
+        const r = await agentClient.request({ method: 'tools/list' }, ListToolsResultSchema);
+        return r.tools.map((t) => t.name);
+      }
+
+      const sdk1 = newSdk();
+      sdk1.app({ id: 'man1', name: 'man1', origin: 'http://localhost' });
+      sdk1.action('keep').handler(() => 'keep');
+      sdk1.action('removeMe').handler(() => 'remove');
+      const welcome1 = await sdk1.connect(url);
+      await claim(agentClient, welcome1.claimCode!);
+      await new Promise((r) => setTimeout(r, 50));
+      let tools = await listTools();
+      expect(tools).toContain('man1__keep');
+      expect(tools).toContain('man1__removeMe');
+
+      await sdk1.disconnect();
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Fresh build: `removeMe` is gone, `newAction` is new.
+      const sdk2 = newSdk();
+      sdk2.app({ id: 'man1', name: 'man1', origin: 'http://localhost' });
+      sdk2.action('keep').handler(() => 'still-here');
+      sdk2.action('newAction').handler(() => 'new');
+      await sdk2.connect(url, {
+        resume: { sessionId: welcome1.sessionId, resumeToken: welcome1.resumeToken! },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      tools = await listTools();
+      expect(tools).toContain('man1__keep');
+      expect(tools).toContain('man1__newAction');
+      expect(tools).not.toContain('man1__removeMe');
+    } finally {
+      await cleanup();
+    }
+  });
+});

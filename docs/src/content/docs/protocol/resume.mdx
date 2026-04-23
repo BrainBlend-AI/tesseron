@@ -73,22 +73,25 @@ All resume failures surface as a `TesseronError` with code `TesseronErrorCode.Re
 | Unclaimed zombie | `<id> was never claimed` |
 | TTL elapsed | Falls under "no resumable session" - the zombie was already evicted |
 | Wrong `resumeToken` | `Invalid resumeToken for session "<id>"` |
+| Malformed params (missing `app`, non-string `sessionId` / `resumeToken`, missing `actions` / `resources` / `capabilities`) | `Invalid tesseron/resume request: expected { protocolVersion, sessionId, resumeToken, app, actions, resources, capabilities }` |
 | Protocol major-version mismatch | Same rules as `tesseron/hello` - throws `ProtocolMismatch` |
 
 Token comparison uses `crypto.timingSafeEqual` with a length pre-check, so a wildly-wrong token doesn't leak timing information about the correct length.
 
 ## Gateway configuration
 
-Pass `resumeTtlMs` to `new TesseronGateway({ ... })` to change how long zombies live:
+Two knobs on `new TesseronGateway({ ... })` shape how aggressive resume is:
 
 ```ts
 const gateway = new TesseronGateway({
   port: 7475,
-  resumeTtlMs: 300_000, // 5 minutes
+  resumeTtlMs: 300_000, // 5 minutes (default: 90_000)
+  maxZombies: 500,      // cap on zombies held simultaneously (default: 100)
 });
 ```
 
-Set to `0` to disable resume entirely - closed sessions drop immediately and any reconnect must start fresh.
+- `resumeTtlMs` — how long a closed session is retained as a resumable zombie. Set to `0` to disable resume entirely: closed sessions drop immediately and any reconnect must start fresh.
+- `maxZombies` — ceiling on the in-memory zombie map. When inserting a new zombie would exceed it, the oldest (longest-retained) zombie is evicted to make room. Keeps a connect/disconnect flood from piling up zombies faster than their TTLs expire. Set to `0` to disable resume entirely (same effect as `resumeTtlMs: 0`).
 
 ## Idiomatic SDK usage
 
