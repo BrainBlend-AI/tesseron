@@ -93,6 +93,7 @@ export default defineConfig({
             { label: 'Wire format (JSON-RPC)', link: '/protocol/wire-format/' },
             { label: 'Transport (WebSocket)', link: '/protocol/transport/' },
             { label: 'Handshake & claiming', link: '/protocol/handshake/' },
+            { label: 'Session resume', link: '/protocol/resume/' },
             { label: 'Action model', link: '/protocol/actions/' },
             { label: 'Progress & cancellation', link: '/protocol/progress-cancellation/' },
             { label: 'Sampling', link: '/protocol/sampling/' },

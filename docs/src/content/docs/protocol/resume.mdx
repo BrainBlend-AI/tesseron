@@ -1,0 +1,146 @@
+---
+title: Session resume
+description: How a Tesseron app rejoins a previously-claimed session after a transport drop via tesseron/resume - protocol shape, gateway behaviour, and the 4-line localStorage recipe.
+---
+
+A Tesseron session lives in the gateway's memory. When the underlying WebSocket drops (tab refresh, window close, network blip, HMR reload), the session normally goes away and a reconnecting app would have to go through the full `tesseron/hello` + claim-code dance again - even if the user had already paired it.
+
+The `tesseron/resume` method lets the app rejoin an existing session it paired earlier, skipping the re-claim. Storage of the resume credentials is deliberately **the implementer's responsibility**: different apps have different opinions about where session credentials can live (localStorage, a cookie, an Electron store, the OS keychain), so the SDK exposes the primitive and leaves the choice to you.
+
+## Flow
+
+1. On a fresh `tesseron/hello`, the gateway returns a `resumeToken` in the welcome. Stash it alongside the `sessionId` wherever fits your app.
+2. When the transport drops, the gateway keeps the session's metadata as a "zombie" for `resumeTtlMs` (default 90 seconds).
+3. On reconnect, the app sends `tesseron/resume` with `{ sessionId, resumeToken }`. If the token matches (constant-time compare) and the zombie is still within its TTL, the gateway reattaches the fresh socket to the existing session and rotates the token.
+4. The caller persists the **new** `resumeToken` from the resume response.
+
+Resume tokens are **one-shot**: every successful resume rotates the token and the previous value stops working. This means the freshest welcome is always the one to persist.
+
+## The `tesseron/resume` request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tesseron/resume",
+  "params": {
+    "protocolVersion": "1.0.0",
+    "sessionId": "s_a1b2c3de1234567",
+    "resumeToken": "Xk9f3nN9kOeGqR7mWpLc2v",
+    "app": { "id": "shop", "name": "Acme Shop", "origin": "http://localhost:3000" },
+    "actions": [ /* same shape as tesseron/hello */ ],
+    "resources": [ /* same shape as tesseron/hello */ ],
+    "capabilities": {
+      "streaming": true,
+      "subscriptions": true,
+      "sampling": true,
+      "elicitation": true
+    }
+  }
+}
+```
+
+`ResumeParams` carries the same `app` / `actions` / `resources` / `capabilities` as `HelloParams` because a fresh app build may have added, removed, or changed them since the previous connect. The gateway replaces the stored manifest with what resume brings in.
+
+## The resume response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "sessionId": "s_a1b2c3de1234567",
+    "protocolVersion": "1.0.0",
+    "capabilities": { "streaming": true, "subscriptions": true, "sampling": true, "elicitation": true },
+    "agent": { "id": "claude-ai", "name": "Claude Desktop" },
+    "resumeToken": "NEW_ROTATED_TOKEN_VALUE"
+  }
+}
+```
+
+- `sessionId` matches the one in the request (same session, reattached to the fresh socket).
+- `resumeToken` is rotated. Overwrite whatever you stashed with this new value.
+- `claimCode` is **omitted** - the session is already claimed, no need for a re-pair.
+
+## Failure modes
+
+All resume failures surface as a `TesseronError` with code `TesseronErrorCode.ResumeFailed` (`-32011`). Callers typically catch the error and fall back to a plain `tesseron/hello`.
+
+| Condition | Message pattern |
+|---|---|
+| Unknown `sessionId` | `No resumable session "<id>"` |
+| Cross-app resume | `Session "<id>" is owned by app "<other>"` |
+| Unclaimed zombie | `<id> was never claimed` |
+| TTL elapsed | Falls under "no resumable session" - the zombie was already evicted |
+| Wrong `resumeToken` | `Invalid resumeToken for session "<id>"` |
+| Malformed params (missing `app`, non-string `sessionId` / `resumeToken`, missing `actions` / `resources` / `capabilities`) | `Invalid tesseron/resume request: expected { protocolVersion, sessionId, resumeToken, app, actions, resources, capabilities }` |
+| Protocol major-version mismatch | Same rules as `tesseron/hello` - throws `ProtocolMismatch` |
+
+Token comparison uses `crypto.timingSafeEqual` with a length pre-check, so a wildly-wrong token doesn't leak timing information about the correct length.
+
+## Gateway configuration
+
+Two knobs on `new TesseronGateway({ ... })` shape how aggressive resume is:
+
+```ts
+const gateway = new TesseronGateway({
+  port: 7475,
+  resumeTtlMs: 300_000, // 5 minutes (default: 90_000)
+  maxZombies: 500,      // cap on zombies held simultaneously (default: 100)
+});
+```
+
+- `resumeTtlMs` — how long a closed session is retained as a resumable zombie. Set to `0` to disable resume entirely: closed sessions drop immediately and any reconnect must start fresh.
+- `maxZombies` — ceiling on the in-memory zombie map. When inserting a new zombie would exceed it, the oldest (longest-retained) zombie is evicted to make room. Keeps a connect/disconnect flood from piling up zombies faster than their TTLs expire. Set to `0` to disable resume entirely (same effect as `resumeTtlMs: 0`).
+
+## Idiomatic SDK usage
+
+The SDK exposes a single `resume` field on `ConnectOptions`. You decide where to stash the token:
+
+```ts
+import { tesseron } from '@tesseron/web';
+
+tesseron.app({ id: 'shop', name: 'Acme Shop' });
+tesseron.action('searchProducts').handler(/* ... */);
+
+const saved = localStorage.getItem('tesseron:shop');
+const welcome = await tesseron.connect(
+  'ws://127.0.0.1:7475',
+  saved ? { resume: JSON.parse(saved) } : undefined,
+);
+
+localStorage.setItem('tesseron:shop', JSON.stringify({
+  sessionId: welcome.sessionId,
+  resumeToken: welcome.resumeToken,
+}));
+```
+
+Four lines. The SDK does not do this for you; `localStorage` is one answer among many. A desktop app might stash the pair in the OS keychain. A server process might put it in a file next to its config. An iframe-embedded app might have CSP reasons not to persist at all.
+
+### Falling back when resume fails
+
+```ts
+try {
+  await tesseron.connect(url, saved ? { resume: JSON.parse(saved) } : undefined);
+} catch (err) {
+  if (err instanceof TesseronError && err.code === TesseronErrorCode.ResumeFailed) {
+    localStorage.removeItem('tesseron:shop');
+    await tesseron.connect(url); // fresh hello
+  } else {
+    throw err;
+  }
+}
+```
+
+## What resume does **not** do
+
+- It does not replay in-flight actions. An action the agent invoked just before the socket dropped is cancelled on the gateway; the agent sees an error (see [lifecycle](/protocol/lifecycle/)) and can retry at its own layer.
+- It does not resurrect resource subscriptions. The SDK re-subscribes on reconnect as it does after any handshake.
+- It does not persist across a gateway restart. Zombies live in gateway process memory; stopping the gateway evicts them. A fresh `tesseron/hello` is required after any gateway restart.
+- It does not work for sessions that were never claimed. The gateway surfaces `ResumeFailed` with `never claimed` so the SDK can fall back to `tesseron/hello` without ambiguity.
+
+## See also
+
+- [Handshake & claiming](/protocol/handshake/) - the `tesseron/hello` flow resume complements.
+- [Lifecycle & failure modes](/protocol/lifecycle/) - how the gateway behaves during drops, retries, and gateway restarts.
+- [Errors & capabilities](/protocol/errors/) - the full `TesseronErrorCode` table including `ResumeFailed`.

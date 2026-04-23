@@ -32,6 +32,7 @@ import {
   type ResourceReadResult,
   type ResourceSubscribeParams,
   type ResourceUnsubscribeParams,
+  type ResumeParams,
   type TesseronCapabilities,
   TesseronErrorCode,
   type WelcomeResult,
@@ -44,6 +45,45 @@ import {
   standardValidate,
 } from './schema-helpers.js';
 import { type Transport, TransportClosedError } from './transport.js';
+
+/**
+ * Credentials returned by a previous {@link WelcomeResult} that let the SDK
+ * rejoin that session via `tesseron/resume` instead of opening a fresh one.
+ * Storage of this pair is the implementer's responsibility — stash it in
+ * localStorage, a cookie, an Electron store, the OS keychain, whatever fits
+ * the app.
+ */
+export interface ResumeCredentials {
+  /** `sessionId` from the prior {@link WelcomeResult}. */
+  sessionId: string;
+  /**
+   * `resumeToken` from the prior {@link WelcomeResult}. Rotated on every
+   * successful resume; persist the value returned in each handshake.
+   */
+  resumeToken: string;
+}
+
+/**
+ * Optional arguments to {@link TesseronClient.connect}. Currently supports
+ * opting into session resume; more may be added in future minor versions.
+ */
+export interface ConnectOptions {
+  /**
+   * If provided, the SDK sends `tesseron/resume` with these credentials
+   * instead of `tesseron/hello`. On a successful resume the returned
+   * {@link WelcomeResult} carries the same `sessionId` and a freshly-rotated
+   * `resumeToken`. On failure (unknown session, TTL elapsed, token mismatch)
+   * the request rejects with a {@link TesseronError} of code
+   * {@link TesseronErrorCode.ResumeFailed}; callers typically fall back to a
+   * plain `connect()` at that point.
+   *
+   * **Resume does NOT restore resource subscriptions.** `resources/subscribe`
+   * bindings on the prior socket are torn down when the transport closes and
+   * are not replayed; if the app relied on push updates, re-subscribe after
+   * the resume handshake resolves.
+   */
+  resume?: ResumeCredentials;
+}
 
 /**
  * App identity sent to the gateway during the `tesseron/hello` handshake.
@@ -173,12 +213,15 @@ export class TesseronClient implements BuilderRegistry {
   }
 
   /**
-   * Sends `tesseron/hello` over the given transport and installs handlers for
-   * action invocations and resource reads. Resolves with the gateway's
-   * {@link WelcomeResult} (includes the claim code the user enters into their MCP client).
+   * Sends `tesseron/hello` (or `tesseron/resume` if {@link ConnectOptions.resume}
+   * is provided) over the given transport and installs handlers for action
+   * invocations and resource reads. Resolves with the gateway's
+   * {@link WelcomeResult}: includes the claim code the user enters into their
+   * MCP client on fresh handshakes, and a `resumeToken` the caller can stash
+   * for a later reconnect.
    * @throws {Error} If called before {@link TesseronClient.app}.
    */
-  async connect(transport: Transport): Promise<WelcomeResult> {
+  async connect(transport: Transport, options?: ConnectOptions): Promise<WelcomeResult> {
     if (!this.appConfig) {
       throw new Error('Tesseron: call app({ id, name }) before connect().');
     }
@@ -213,14 +256,20 @@ export class TesseronClient implements BuilderRegistry {
       return undefined;
     });
 
-    const hello: HelloParams = {
+    const baseParams = {
       protocolVersion: PROTOCOL_VERSION,
       app: this.appConfig,
       actions: this.actionManifest(),
       resources: this.resourceManifest(),
       capabilities: SDK_CAPABILITIES,
     };
-    const welcome = await dispatcher.request('tesseron/hello', hello);
+    const welcome = options?.resume
+      ? await dispatcher.request('tesseron/resume', {
+          ...baseParams,
+          sessionId: options.resume.sessionId,
+          resumeToken: options.resume.resumeToken,
+        } satisfies ResumeParams)
+      : await dispatcher.request('tesseron/hello', baseParams satisfies HelloParams);
     this.welcome = welcome;
     return welcome;
   }

@@ -10,4 +10,9 @@ export * from './context.js';
 export * from './builder.js';
 export * from './errors.js';
 export * from './transport.js';
-export { TesseronClient, type AppConfig } from './client.js';
+export {
+  TesseronClient,
+  type AppConfig,
+  type ConnectOptions,
+  type ResumeCredentials,
+} from './client.js';

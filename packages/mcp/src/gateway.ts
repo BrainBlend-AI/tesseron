@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   type ElicitationRequestParams,
@@ -7,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   type ProgressUpdate,
   type ResourceReadResult,
+  type ResumeParams,
   type SamplingRequestParams,
   type SamplingResult,
   TesseronError,
@@ -20,6 +22,7 @@ import {
   type Session,
   generateClaimCode,
   generateInvocationId,
+  generateResumeToken,
   generateSessionId,
   validateAppId,
 } from './session.js';
@@ -32,6 +35,20 @@ export interface GatewayOptions {
   host?: string;
   /** Extra origins accepted in addition to localhost/127.0.0.1. Anything else is rejected with 403. */
   originAllowlist?: string[];
+  /**
+   * Milliseconds to retain a closed session as a "zombie" so a reconnecting SDK
+   * can rejoin via `tesseron/resume`. Default {@link DEFAULT_RESUME_TTL_MS}.
+   * Set to `0` to disable session resume entirely — closed sessions drop
+   * immediately and any reconnect must start fresh with `tesseron/hello`.
+   */
+  resumeTtlMs?: number;
+  /**
+   * Maximum number of zombie sessions retained simultaneously. When adding a
+   * new zombie would exceed this cap, the oldest (longest-retained) zombie is
+   * evicted. Defaults to {@link DEFAULT_MAX_ZOMBIES}. Exists so a peer that
+   * rapidly connects and disconnects can't accumulate unbounded memory.
+   */
+  maxZombies?: number;
 }
 
 /** Options for {@link TesseronGateway.invokeAction}. */
@@ -82,6 +99,19 @@ export type ElicitationHandler = (
 export const DEFAULT_GATEWAY_PORT = 7475;
 /** Default gateway bind host; loopback-only to prevent accidental LAN exposure. */
 export const DEFAULT_GATEWAY_HOST = '127.0.0.1';
+/**
+ * Default zombie-session retention window (90 s). Long enough to cover a
+ * manual tab refresh, a routine HMR cycle, or a brief network blip; short
+ * enough that abandoned sessions don't accumulate.
+ */
+export const DEFAULT_RESUME_TTL_MS = 90_000;
+/**
+ * Default cap on {@link TesseronGateway.zombieSessions}. A peer that repeatedly
+ * connects and disconnects could otherwise pile up zombies until their TTLs
+ * elapse; when the cap is reached the oldest (longest-retained) zombie is
+ * evicted to make room.
+ */
+export const DEFAULT_MAX_ZOMBIES = 100;
 
 /** Capabilities the connected MCP client advertised to the bridge. */
 export interface AgentCapabilityInfo {
@@ -107,6 +137,26 @@ interface ActiveInvocation {
 }
 
 /**
+ * A recently-closed session retained in memory so a reconnecting SDK can
+ * rejoin it via `tesseron/resume`. Carries only the metadata the resume
+ * handler needs — the dead WebSocket and its dispatcher are deliberately
+ * dropped so we never try to write to them.
+ */
+interface ZombieSession {
+  id: string;
+  app: Session['app'];
+  actions: Session['actions'];
+  resources: Session['resources'];
+  capabilities: Session['capabilities'];
+  resumeToken: string;
+  claimCode: string;
+  claimed: boolean;
+  claimedAt?: number;
+  /** Timer that removes this zombie from {@link TesseronGateway.zombieSessions} once the TTL elapses. */
+  evictTimer: ReturnType<typeof setTimeout>;
+}
+
+/**
  * Local WebSocket server that hosts Tesseron sessions. SDK clients connect
  * and send `tesseron/hello`; an {@link McpAgentBridge} consumes the gateway on
  * the MCP-server side to expose claimed sessions as tools and resources. Emits
@@ -117,6 +167,17 @@ export class TesseronGateway extends EventEmitter {
   private readonly sessions = new Map<string, Session>();
   private readonly pendingClaims = new Map<string, string>();
   private readonly activeInvocations = new Map<string, ActiveInvocation>();
+  /**
+   * Recently-closed sessions kept around for a TTL window so the SDK can
+   * rejoin them with `tesseron/resume`. See {@link GatewayOptions.resumeTtlMs}.
+   */
+  private readonly zombieSessions = new Map<string, ZombieSession>();
+  /**
+   * Flipped true by {@link stop} so in-flight `ws.on('close')` events queued by
+   * `ws.close()` during shutdown skip re-inserting zombies into the map we
+   * just cleared. Reset by {@link start} so the gateway can be restarted.
+   */
+  private stopped = false;
   private samplingHandler?: SamplingHandler;
   private elicitationHandler?: ElicitationHandler;
   private agentCapabilities: AgentCapabilityInfo = { ...DEFAULT_AGENT_CAPABILITIES };
@@ -127,6 +188,7 @@ export class TesseronGateway extends EventEmitter {
 
   /** Binds the WebSocket server. Resolves when `listening` fires; rejects on bind error. */
   async start(): Promise<void> {
+    this.stopped = false;
     const port = this.options.port ?? DEFAULT_GATEWAY_PORT;
     const host = this.options.host ?? DEFAULT_GATEWAY_HOST;
     const allowlist = new Set(this.options.originAllowlist ?? []);
@@ -161,12 +223,22 @@ export class TesseronGateway extends EventEmitter {
 
   /** Closes all sessions and shuts down the WebSocket server. */
   async stop(): Promise<void> {
+    // Mark stopped before closing sockets: ws.close() queues a 'close' event
+    // that runs AFTER this function returns, and without the guard each one
+    // would re-insert a zombie into the map we're about to clear.
+    this.stopped = true;
     for (const session of this.sessions.values()) {
       session.ws.close(1001, 'Gateway shutting down');
     }
     this.sessions.clear();
     this.pendingClaims.clear();
     this.activeInvocations.clear();
+    // Cancel every outstanding zombie eviction timer; their sessions will never
+    // resume across a gateway restart regardless.
+    for (const zombie of this.zombieSessions.values()) {
+      clearTimeout(zombie.evictTimer);
+    }
+    this.zombieSessions.clear();
     if (!this.wss) return;
     return new Promise<void>((resolve, reject) => {
       this.wss?.close((err) => (err ? reject(err) : resolve()));
@@ -372,6 +444,49 @@ export class TesseronGateway extends EventEmitter {
       dispatcher.rejectAllPending(new TransportClosedError('Session socket closed'));
 
       if (!session) return;
+
+      // Zombify the session so a reconnecting SDK can rejoin via
+      // `tesseron/resume` within the TTL. When the feature is disabled
+      // (resumeTtlMs <= 0 or maxZombies <= 0) or the gateway is shutting
+      // down, the session is dropped immediately.
+      const resumeTtl = this.options.resumeTtlMs ?? DEFAULT_RESUME_TTL_MS;
+      const maxZombies = this.options.maxZombies ?? DEFAULT_MAX_ZOMBIES;
+      if (resumeTtl > 0 && maxZombies > 0 && !this.stopped) {
+        // Cap the map to prevent a connect/disconnect flood from piling up
+        // zombies until their TTLs elapse. Map iteration order is insertion
+        // order, so the first key is the oldest entry.
+        if (this.zombieSessions.size >= maxZombies) {
+          const oldestId = this.zombieSessions.keys().next().value;
+          if (oldestId !== undefined) {
+            const oldest = this.zombieSessions.get(oldestId);
+            if (oldest) clearTimeout(oldest.evictTimer);
+            this.zombieSessions.delete(oldestId);
+            logToStderr(
+              `[tesseron] zombie cap (${maxZombies}) reached — evicted oldest zombie ${oldestId}`,
+            );
+          }
+        }
+        const closedSession = session;
+        const evictTimer = setTimeout(() => {
+          this.zombieSessions.delete(closedSession.id);
+        }, resumeTtl);
+        // Allow the process to exit even while the zombie waits out its TTL;
+        // the gateway itself doesn't keep Node alive once the WS server stops.
+        evictTimer.unref?.();
+        this.zombieSessions.set(closedSession.id, {
+          id: closedSession.id,
+          app: closedSession.app,
+          actions: closedSession.actions,
+          resources: closedSession.resources,
+          capabilities: closedSession.capabilities,
+          resumeToken: closedSession.resumeToken,
+          claimCode: closedSession.claimCode,
+          claimed: closedSession.claimed,
+          claimedAt: closedSession.claimedAt,
+          evictTimer,
+        });
+      }
+
       this.sessions.delete(session.id);
       this.pendingClaims.delete(session.claimCode);
       // Cancel any active invocations for this session
@@ -410,6 +525,7 @@ export class TesseronGateway extends EventEmitter {
 
       const sessionId = generateSessionId();
       const claimCode = generateClaimCode();
+      const resumeToken = generateResumeToken();
       session = {
         id: sessionId,
         app: helloParams.app,
@@ -420,6 +536,7 @@ export class TesseronGateway extends EventEmitter {
         capabilities: helloParams.capabilities,
         claimCode,
         claimed: false,
+        resumeToken,
       };
       this.sessions.set(sessionId, session);
       this.pendingClaims.set(claimCode, sessionId);
@@ -441,6 +558,171 @@ export class TesseronGateway extends EventEmitter {
           name: this.agentCapabilities.clientName ?? 'Awaiting agent',
         },
         claimCode,
+        resumeToken,
+      };
+      return welcome;
+    });
+
+    dispatcher.on('tesseron/resume', async (params): Promise<WelcomeResult> => {
+      const resumeParams = params as ResumeParams;
+
+      if (session) {
+        // A well-behaved SDK never does this; it's a programming error, not a
+        // recoverable resume failure. InvalidRequest (not ResumeFailed) so any
+        // SDK fallback-on-ResumeFailed logic doesn't loop on a malformed call.
+        throw new TesseronError(
+          TesseronErrorCode.InvalidRequest,
+          'This socket is already attached to a session. Send tesseron/resume on a fresh connection.',
+        );
+      }
+
+      // Guard every field the handler dereferences below. Without this, a
+      // malformed resume (missing `app`, non-string `resumeToken`, absent
+      // `actions`) bails out as a raw TypeError — which the dispatcher
+      // surfaces as a generic InternalError and the SDK's ResumeFailed
+      // fallback path never sees. Validate once, up front, typed.
+      if (
+        typeof resumeParams.sessionId !== 'string' ||
+        typeof resumeParams.resumeToken !== 'string' ||
+        typeof resumeParams.protocolVersion !== 'string' ||
+        !resumeParams.app ||
+        typeof resumeParams.app.id !== 'string' ||
+        !Array.isArray(resumeParams.actions) ||
+        !Array.isArray(resumeParams.resources) ||
+        !resumeParams.capabilities ||
+        typeof resumeParams.capabilities !== 'object'
+      ) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          'Invalid tesseron/resume request: expected { protocolVersion, sessionId, resumeToken, app, actions, resources, capabilities }.',
+        );
+      }
+
+      // Same protocol-version policy as hello: hard-reject on major mismatch,
+      // warn on minor. A resuming SDK that upgraded past a major bump must
+      // fall back to a fresh tesseron/hello with its new manifest.
+      const [theirMajor, theirMinor] = parseProtocolVersion(resumeParams.protocolVersion);
+      const [ourMajor, ourMinor] = parseProtocolVersion(PROTOCOL_VERSION);
+      if (theirMajor !== ourMajor) {
+        throw new TesseronError(
+          TesseronErrorCode.ProtocolMismatch,
+          `Gateway speaks protocol ${PROTOCOL_VERSION}; SDK sent ${resumeParams.protocolVersion}. Major version mismatch on resume — pin compatible package versions or start a fresh session.`,
+        );
+      }
+      if (theirMinor !== ourMinor) {
+        logToStderr(
+          `[tesseron] protocol minor version mismatch on resume: gateway=${PROTOCOL_VERSION}, SDK=${resumeParams.protocolVersion}.`,
+        );
+      }
+
+      // Remap validateAppId's plain Error into the typed ResumeFailed the
+      // ConnectOptions.resume contract promises, so SDK fallback logic that
+      // branches on err.code === ResumeFailed catches malformed app ids too.
+      try {
+        validateAppId(resumeParams.app.id);
+      } catch (err) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          err instanceof Error ? err.message : 'Invalid app id on resume.',
+        );
+      }
+
+      const zombie = this.zombieSessions.get(resumeParams.sessionId);
+      if (!zombie) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          `No resumable session "${resumeParams.sessionId}". The TTL may have elapsed, the gateway may have restarted, or the session never existed.`,
+        );
+      }
+
+      if (zombie.app.id !== resumeParams.app.id) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          `Session "${resumeParams.sessionId}" is owned by app "${zombie.app.id}", not "${resumeParams.app.id}". Refusing cross-app resume.`,
+        );
+      }
+
+      // Resume is only meaningful for sessions that were actually claimed; an
+      // unclaimed zombie's original claim code is already gone from
+      // pendingClaims and there's nothing user-visible to restore. Surface a
+      // clean error so the SDK knows to fall back to a fresh tesseron/hello.
+      if (!zombie.claimed) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          `Session "${resumeParams.sessionId}" was never claimed; open a fresh session with tesseron/hello instead.`,
+        );
+      }
+
+      // Constant-time token compare. timingSafeEqual throws on mismatched-
+      // length buffers, so gate it behind an explicit length check first to
+      // return a clean ResumeFailed instead of a raw TypeError. Both tokens
+      // are 32-char base64url in the happy path.
+      const presented = Buffer.from(resumeParams.resumeToken);
+      const stored = Buffer.from(zombie.resumeToken);
+      if (presented.length !== stored.length || !timingSafeEqual(presented, stored)) {
+        throw new TesseronError(
+          TesseronErrorCode.ResumeFailed,
+          `Invalid resumeToken for session "${resumeParams.sessionId}".`,
+        );
+      }
+
+      // Token validated. Cancel eviction, remove zombie, promote to live
+      // session with the fresh socket + dispatcher, and rotate the token.
+      clearTimeout(zombie.evictTimer);
+      this.zombieSessions.delete(zombie.id);
+
+      if (origin && resumeParams.app.origin !== origin) {
+        // The socket's Origin header is the authoritative value (it's what the
+        // gateway already allowlisted during the WS upgrade). Log the mismatch
+        // against the zombie's stored origin — a drift here can indicate a
+        // misconfigured build (staging bundle dialing a prod gateway, or a
+        // tenant swap) and otherwise leaves no forensic trail.
+        logToStderr(
+          `[tesseron] resume origin mismatch for session ${zombie.id}: stored=${zombie.app.origin} declared=${resumeParams.app.origin} socket=${origin} — rewriting to socket origin`,
+        );
+        resumeParams.app.origin = origin;
+      }
+
+      const rotatedResumeToken = generateResumeToken();
+      session = {
+        id: zombie.id,
+        app: resumeParams.app,
+        ws,
+        dispatcher,
+        actions: resumeParams.actions,
+        resources: resumeParams.resources,
+        capabilities: resumeParams.capabilities,
+        claimCode: zombie.claimCode,
+        claimed: zombie.claimed,
+        claimedAt: zombie.claimedAt,
+        resumeToken: rotatedResumeToken,
+      };
+      this.sessions.set(zombie.id, session);
+
+      logToStderr(
+        `[tesseron] resumed session "${resumeParams.app.name}" (${zombie.id}) — claim preserved`,
+      );
+
+      // The MCP bridge sees the reattached session via sessions-changed and
+      // re-advertises its tools, so the agent gets them back in tools/list.
+      this.emit('sessions-changed');
+
+      const welcome: WelcomeResult = {
+        sessionId: zombie.id,
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {
+          streaming: true,
+          subscriptions: true,
+          sampling: this.agentCapabilities.sampling,
+          elicitation: this.agentCapabilities.elicitation,
+        },
+        agent: {
+          id: this.agentCapabilities.clientName ?? 'pending',
+          name: this.agentCapabilities.clientName ?? 'Awaiting agent',
+        },
+        // No claimCode on resume: the session is already claimed; re-issuing
+        // a pairing code would only confuse the UI.
+        resumeToken: rotatedResumeToken,
       };
       return welcome;
     });

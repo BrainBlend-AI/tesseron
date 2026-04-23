@@ -69,6 +69,7 @@ export const TesseronErrorCode = {
   SamplingDepthExceeded: -32008,
   Unauthorized: -32009,
   TransportClosed: -32010,
+  ResumeFailed: -32011,
 } as const;
 
 export type TesseronErrorCodeValue = (typeof TesseronErrorCode)[keyof typeof TesseronErrorCode];
@@ -131,17 +132,36 @@ export interface HelloParams {
 }
 
 /**
- * Result of the `tesseron/hello` handshake. Carries the session id, the
- * capabilities the MCP client will honour, the connected agent's identity
- * (filled once a bridge attaches), and the `claimCode` the user pastes into
- * their MCP client to link this session.
+ * Result of the `tesseron/hello` handshake (and `tesseron/resume`). Carries the
+ * session id, the capabilities the MCP client will honour, the connected
+ * agent's identity (filled once a bridge attaches), the `claimCode` the user
+ * pastes into their MCP client to link this session, and an opaque
+ * `resumeToken` the caller can stash wherever fits their app to rejoin this
+ * session after a transport drop.
  */
 export interface WelcomeResult {
   sessionId: string;
   protocolVersion: string;
   capabilities: TesseronCapabilities;
   agent: AgentIdentity;
+  /**
+   * 6-character pairing code the user enters in their MCP client. Present on
+   * every `tesseron/hello` response. Always **absent** on a successful
+   * `tesseron/resume` response: the gateway only permits resume for
+   * already-claimed sessions, so re-issuing a pairing code would be a no-op
+   * at best and a UI confusion at worst.
+   */
   claimCode?: string;
+  /**
+   * Server-issued token that, together with {@link WelcomeResult.sessionId},
+   * lets a reconnecting SDK rejoin this session via `tesseron/resume` after the
+   * transport drops. Rotated on every successful resume (one-shot) — callers
+   * that persist it MUST overwrite with the freshest value from each handshake.
+   *
+   * Optional on the wire for backwards-compatibility with gateways that pre-date
+   * the resume extension; new gateways always populate it.
+   */
+  resumeToken?: string;
 }
 
 /** Identity advertised by the MCP client that claimed this session. */
@@ -149,6 +169,35 @@ export interface AgentIdentity {
   id: string;
   name: string;
 }
+
+/**
+ * Parameters of the `tesseron/resume` request sent by the SDK when it already
+ * has a `sessionId` + `resumeToken` pair from a prior handshake and wants to
+ * rejoin an existing (possibly-claimed) session instead of opening a fresh one.
+ *
+ * Carries the same `app` / `actions` / `resources` / `capabilities` as a
+ * regular `tesseron/hello` because a fresh app build may have added, removed,
+ * or changed them since the previous connect. The gateway updates the session's
+ * registered manifest from these fields on a successful resume.
+ */
+export interface ResumeParams extends HelloParams {
+  /** Opaque session identifier returned in the prior {@link WelcomeResult}. */
+  sessionId: string;
+  /**
+   * Opaque token returned in the prior {@link WelcomeResult}. Gateway compares
+   * against the stored token in constant time and rotates it on success; the
+   * freshly-returned {@link WelcomeResult.resumeToken} is the one to persist.
+   */
+  resumeToken: string;
+}
+
+/**
+ * Result of the `tesseron/resume` request. Same shape as {@link WelcomeResult}
+ * — `sessionId` matches the param, `resumeToken` is rotated, and `claimCode`
+ * is always absent (the gateway only permits resume for already-claimed
+ * sessions, so there is no pairing code to re-issue).
+ */
+export type ResumeResult = WelcomeResult;
 
 export interface ActionInvokeParams {
   name: string;
@@ -233,6 +282,7 @@ export interface LogParams {
 
 export interface TesseronMethods {
   'tesseron/hello': { params: HelloParams; result: WelcomeResult };
+  'tesseron/resume': { params: ResumeParams; result: ResumeResult };
   'sampling/request': { params: SamplingRequestParams; result: SamplingResult };
   'elicitation/request': { params: ElicitationRequestParams; result: ElicitationResult };
   'actions/invoke': { params: ActionInvokeParams; result: ActionResultPayload };
