@@ -12,15 +12,23 @@ import Diagram from '../../../components/Diagram.astro';
 
 <Diagram
   caption="Three processes, two protocols. Your app hosts a WebSocket endpoint and announces itself; the gateway dials in and speaks MCP stdio to the agent."
+  nodeWidth={130}
+  spacing={140}
+  pad={42}
   nodes={[
     { id: 'user',  label: 'USER',    sub: ['human at', 'the keyboard'],     icon: 'user' },
-    { id: 'app',   label: 'YOUR APP', sub: 'WS server + tab file', code: '@tesseron/vite | /server', icon: 'window' },
-    { id: 'gw',    label: 'MCP GATEWAY', sub: 'WS client + MCP', code: '@tesseron/mcp', icon: 'bridge', variant: 'accent' },
+    { id: 'app',   label: 'YOUR APP', sub: ['WS server +', 'tab file'], icon: 'window' },
+    { id: 'gw',    label: 'MCP GATEWAY', sub: ['WS client', '+ MCP'], icon: 'bridge', variant: 'accent' },
     { id: 'agent', label: 'AGENT',   sub: ['Claude Code,', 'Cursor, Desktop'], icon: 'agent' },
   ]}
   edges={[
     { from: 'user', to: 'app' },
-    { from: 'gw',   to: 'app',   label: 'WebSocket', bidirectional: true, accent: true },
+    // Arrow direction controls ELK's layer assignment — `app → gw → agent`
+    // forms a linear chain so the four cards sit in one horizontal row.
+    // The bidirectional flag keeps the visual meaning (both protocols flow
+    // both ways) regardless of source/target. In reality the gateway is
+    // the WS client dialling into the app; only the layout is reversed.
+    { from: 'app',  to: 'gw',    label: 'WebSocket', bidirectional: true, accent: true },
     { from: 'gw',   to: 'agent', label: 'MCP stdio', bidirectional: true, accent: true },
   ]}
 />
