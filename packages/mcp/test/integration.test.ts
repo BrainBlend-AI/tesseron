@@ -6,7 +6,7 @@ import { TesseronError, TesseronErrorCode, type TesseronStructuredError } from '
 import { ServerTesseronClient } from '@tesseron/server';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { McpAgentBridge, TesseronGateway } from '../src/index.js';
-import { dialSdk, prepareSandbox, type Sandbox } from './setup.js';
+import { type Sandbox, dialSdk, prepareSandbox } from './setup.js';
 
 let sandbox: Sandbox;
 let gateway: TesseronGateway;
@@ -656,9 +656,7 @@ describe('Tesseron MCP integration', () => {
 });
 
 describe('Tool surface modes', () => {
-  async function buildBridge(
-    toolSurface: 'dynamic' | 'meta' | 'both',
-  ): Promise<{
+  async function buildBridge(toolSurface: 'dynamic' | 'meta' | 'both'): Promise<{
     gateway: TesseronGateway;
     client: Client;
     sdk: ServerTesseronClient;
