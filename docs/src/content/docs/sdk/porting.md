@@ -51,15 +51,27 @@ Test this in isolation against a pair of in-memory dispatchers. No networking ye
 
 ## Step 4 - write the transport
 
-A WebSocket **server** that:
+You're picking a **binding** (which wire format) and writing the SDK-side host. Tesseron's protocol layer is binding-neutral; pick from the [documented bindings](/protocol/transport/) or design a new one.
 
-- Binds `127.0.0.1` on an OS-picked port.
-- Writes `~/.tesseron/tabs/<tabId>.json` with `{ version: 1, tabId, appName, wsUrl, addedAt }` where `wsUrl` is the URL just bound.
-- Accepts exactly one upgrade request that advertises the `tesseron-gateway` WebSocket subprotocol; rejects every other attempt.
-- Serialises outgoing objects with the language's standard JSON library and parses incoming text frames as JSON.
-- Deletes its tab file on close.
+For a WebSocket binding:
 
-The gateway is always the WebSocket **client** - it watches `~/.tesseron/tabs/` and dials each `wsUrl` it finds. Your runtime never opens an outbound connection; it binds, announces, and waits.
+- Bind `127.0.0.1` on an OS-picked port.
+- Write `~/.tesseron/instances/<instanceId>.json` with `{ version: 2, instanceId, appName, addedAt, transport: { kind: 'ws', url } }` where `url` is the URL just bound.
+- Accept exactly one upgrade request that advertises the `tesseron-gateway` WebSocket subprotocol; reject every other attempt.
+- Serialise outgoing objects with the language's standard JSON library and parse incoming text frames as JSON.
+- Delete the manifest on close.
+
+For a UDS binding (Linux / macOS):
+
+- Create a private (mode `0700`) directory under `os.tmpdir()`-equivalent. Bind a socket inside it, `chmod 0600` the socket file.
+- Write `~/.tesseron/instances/<instanceId>.json` with `{ version: 2, instanceId, appName, addedAt, transport: { kind: 'uds', path } }`.
+- Accept exactly one connection; reject subsequent connect attempts.
+- Frame messages as NDJSON (`JSON.stringify(msg) + '\n'`); split incoming bytes on `\n`.
+- Delete the manifest, the socket file, and the temp dir on close.
+
+The gateway is always the **client** - it watches `~/.tesseron/instances/`, picks a dialer matching `transport.kind`, and connects. Your runtime never opens an outbound connection; it binds, announces, and waits.
+
+To add a binding the gateway doesn't yet know about, you also need to ship a `GatewayDialer` for the new `kind` (in TypeScript: `packages/mcp/src/dialer.ts`) and document the wire format under `/protocol/transport-bindings/<kind>/`.
 
 Don't reinvent backoff or reconnect inside the transport - that's the user's job.
 
@@ -109,8 +121,8 @@ Each `on(...)` handler maps to the corresponding builder. Implement progress / s
 Before you ship, make sure the SDK passes every line of this list. An SDK that fails any line is not Tesseron-compliant.
 
 **Handshake**
-- [ ] Sends `tesseron/hello` immediately after WebSocket open.
-- [ ] Sends `protocolVersion = "1.0.0"` exactly.
+- [ ] Sends `tesseron/hello` immediately after the binding's connection becomes ready.
+- [ ] Sends `protocolVersion = "1.1.0"` exactly.
 - [ ] Sends `app.id` that matches `/^[a-z][a-z0-9_]*$/`.
 - [ ] Surfaces `welcome.claimCode` to the caller (stdout, event, return value - your choice).
 - [ ] Surfaces `welcome.capabilities` as the authoritative agent capability set to handlers.

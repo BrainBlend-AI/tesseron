@@ -10,6 +10,7 @@ export * from './context.js';
 export * from './builder.js';
 export * from './errors.js';
 export * from './transport.js';
+export * from './transport-spec.js';
 export {
   TesseronClient,
   type AppConfig,

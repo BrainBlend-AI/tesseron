@@ -2767,7 +2767,7 @@ var require_websocket = __commonJS({
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
-      opts.createConnection = opts.createConnection || (isSecure ? tlsConnect : netConnect);
+      opts.createConnection = opts.createConnection || (isSecure ? tlsConnect : netConnect2);
       opts.defaultPort = opts.defaultPort || defaultPort;
       opts.port = parsedUrl.port || defaultPort;
       opts.host = parsedUrl.hostname.startsWith("[") ? parsedUrl.hostname.slice(1, -1) : parsedUrl.hostname;
@@ -2963,7 +2963,7 @@ var require_websocket = __commonJS({
       websocket.emit("error", err);
       websocket.emitClose();
     }
-    function netConnect(options) {
+    function netConnect2(options) {
       options.path = options.socketPath;
       return net.connect(options);
     }
@@ -18826,7 +18826,7 @@ var StdioServerTransport = class {
 };
 
 // src/gateway.ts
-var import_node_buffer = require("buffer");
+var import_node_buffer2 = require("buffer");
 var import_node_crypto2 = require("crypto");
 var import_node_events = require("events");
 var import_node_fs = require("fs");
@@ -18836,7 +18836,7 @@ var import_node_os = require("os");
 var import_node_path = require("path");
 
 // ../core/src/protocol.ts
-var PROTOCOL_VERSION = "1.0.0";
+var PROTOCOL_VERSION = "1.1.0";
 var JSONRPC_VERSION2 = "2.0";
 var TesseronErrorCode = {
   ParseError: -32700,
@@ -19088,6 +19088,10 @@ function assertValidElicitSchema(schema) {
   return schema;
 }
 
+// src/dialer.ts
+var import_node_buffer = require("buffer");
+var import_node_net = require("net");
+
 // ../../node_modules/.pnpm/ws@8.20.0/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
 var import_extension = __toESM(require_extension(), 1);
@@ -19097,6 +19101,140 @@ var import_sender = __toESM(require_sender(), 1);
 var import_subprotocol = __toESM(require_subprotocol(), 1);
 var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
+
+// src/dialer.ts
+var GATEWAY_SUBPROTOCOL = "tesseron-gateway";
+var WsDialer = class {
+  kind = "ws";
+  dial(spec) {
+    const ws = new import_websocket.default(spec.url, [GATEWAY_SUBPROTOCOL]);
+    const messageHandlers = [];
+    const closeHandlers = [];
+    ws.on("message", (data) => {
+      const text = rawDataToString(data);
+      if (text === null) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return;
+      }
+      for (const h of messageHandlers) h(parsed);
+    });
+    ws.on("close", (_code, reason) => {
+      const text = reason?.toString("utf-8") ?? "";
+      for (const h of closeHandlers) h(text || void 0);
+    });
+    const opened = new Promise((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once(
+        "error",
+        (err) => reject(new Error(`Failed to connect to ${spec.url}: ${err.message}`))
+      );
+    });
+    const transport = {
+      send(message) {
+        try {
+          ws.send(JSON.stringify(message));
+        } catch {
+        }
+      },
+      onMessage(handler) {
+        messageHandlers.push(handler);
+      },
+      onClose(handler) {
+        closeHandlers.push(handler);
+      },
+      close(reason) {
+        ws.close(1e3, reason);
+      }
+    };
+    return {
+      transport,
+      opened,
+      onClose(handler) {
+        ws.once("close", handler);
+      },
+      close(reason) {
+        ws.close(1e3, reason);
+      }
+    };
+  }
+};
+var UdsDialer = class {
+  kind = "uds";
+  dial(spec) {
+    const socket = (0, import_node_net.connect)({ path: spec.path });
+    const messageHandlers = [];
+    const closeHandlers = [];
+    let buffer = "";
+    socket.setEncoding("utf-8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (line.length > 0) {
+          let parsed;
+          try {
+            parsed = JSON.parse(line);
+            for (const h of messageHandlers) h(parsed);
+          } catch {
+          }
+        }
+        newlineIndex = buffer.indexOf("\n");
+      }
+    });
+    socket.on("close", () => {
+      for (const h of closeHandlers) h();
+    });
+    socket.on("error", () => {
+    });
+    const opened = new Promise((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once(
+        "error",
+        (err) => reject(new Error(`Failed to connect to ${spec.path}: ${err.message}`))
+      );
+    });
+    const transport = {
+      send(message) {
+        try {
+          socket.write(`${JSON.stringify(message)}
+`);
+        } catch {
+        }
+      },
+      onMessage(handler) {
+        messageHandlers.push(handler);
+      },
+      onClose(handler) {
+        closeHandlers.push(handler);
+      },
+      close(_reason) {
+        socket.end();
+      }
+    };
+    return {
+      transport,
+      opened,
+      onClose(handler) {
+        socket.once("close", handler);
+      },
+      close(_reason) {
+        socket.end();
+      }
+    };
+  }
+};
+function rawDataToString(data) {
+  if (typeof data === "string") return data;
+  if (import_node_buffer.Buffer.isBuffer(data)) return data.toString("utf-8");
+  if (Array.isArray(data)) return import_node_buffer.Buffer.concat(data).toString("utf-8");
+  if (data instanceof ArrayBuffer) return import_node_buffer.Buffer.from(data).toString("utf-8");
+  return null;
+}
 
 // src/session.ts
 var import_node_crypto = require("crypto");
@@ -19135,11 +19273,15 @@ var DEFAULT_AGENT_CAPABILITIES = {
   sampling: false,
   elicitation: false
 };
-var GATEWAY_SUBPROTOCOL = "tesseron-gateway";
 var TesseronGateway = class extends import_node_events.EventEmitter {
   constructor(options = {}) {
     super();
     this.options = options;
+    this.dialers = /* @__PURE__ */ new Map();
+    const builtIns = options.dialers ?? [new WsDialer(), new UdsDialer()];
+    for (const dialer of builtIns) {
+      this.dialers.set(dialer.kind, dialer);
+    }
   }
   options;
   sessions = /* @__PURE__ */ new Map();
@@ -19151,22 +19293,23 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    */
   zombieSessions = /* @__PURE__ */ new Map();
   /**
-   * Flipped true by {@link stop} so in-flight `ws.on('close')` events queued by
+   * Flipped true by {@link stop} so in-flight transport-close events queued by
    * shutdown skip re-inserting zombies into the map we just cleared.
    */
   stopped = false;
   samplingHandler;
   elicitationHandler;
   agentCapabilities = { ...DEFAULT_AGENT_CAPABILITIES };
-  /** Tab IDs already connected via {@link watchAppsJson} so we don't double-connect. */
-  connectedTabs = /* @__PURE__ */ new Map();
-  appsWatcher;
-  appsWatchInterval;
-  /** Closes all sessions, outbound connections, and the tabs-dir watcher. */
+  /** Instance IDs already connected via {@link watchInstances} so we don't double-connect. */
+  connected = /* @__PURE__ */ new Map();
+  dialers;
+  discoveryWatchers = [];
+  discoveryInterval;
+  /** Closes all sessions, outbound connections, and discovery watchers. */
   async stop() {
     this.stopped = true;
     for (const session of this.sessions.values()) {
-      session.ws.close(1001, "Gateway shutting down");
+      session.transport.close("Gateway shutting down");
     }
     this.sessions.clear();
     this.pendingClaims.clear();
@@ -19175,16 +19318,18 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       clearTimeout(zombie.evictTimer);
     }
     this.zombieSessions.clear();
-    this.appsWatcher?.close();
-    this.appsWatcher = void 0;
-    if (this.appsWatchInterval) {
-      clearInterval(this.appsWatchInterval);
-      this.appsWatchInterval = void 0;
+    for (const w of this.discoveryWatchers) {
+      w.close();
     }
-    for (const ws of this.connectedTabs.values()) {
-      ws.close(1001, "Gateway shutting down");
+    this.discoveryWatchers = [];
+    if (this.discoveryInterval) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = void 0;
     }
-    this.connectedTabs.clear();
+    for (const dialed of this.connected.values()) {
+      dialed.close("Gateway shutting down");
+    }
+    this.connected.clear();
   }
   /** Installs the handler invoked for `sampling/request`. Pass `undefined` to clear. */
   setSamplingHandler(handler) {
@@ -19212,100 +19357,146 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
     return { ...this.agentCapabilities };
   }
   /**
-   * Connects outbound to a Tesseron Vite plugin tab endpoint. The gateway becomes the
-   * WebSocket client; the Vite plugin bridges it to the browser tab. The session
-   * lifecycle (tesseron/hello, resume, zombie TTL) is identical to inbound connections.
+   * Connects outbound to a Tesseron app instance using the binding described
+   * by `spec`. The gateway becomes the transport client; the app accepts the
+   * single inbound connection. The session lifecycle (tesseron/hello, resume,
+   * zombie TTL) is identical regardless of which binding ships the bytes.
    *
-   * @param tabId - Unique ID assigned by the Vite plugin, used to deduplicate.
-   * @param wsUrl - Full WebSocket URL to connect to, e.g. `ws://127.0.0.1:5173/@tesseron/ws/tab-abc`.
+   * @param instanceId - Unique ID assigned by the SDK side; used to deduplicate.
+   * @param spec - {@link TransportSpec} discriminating which dialer to use.
    */
-  async connectToApp(tabId, wsUrl) {
-    if (this.connectedTabs.has(tabId)) return;
-    const ws = new import_websocket.default(wsUrl, [GATEWAY_SUBPROTOCOL]);
-    this.connectedTabs.set(tabId, ws);
-    this.handleConnection(ws, void 0);
-    ws.once("close", () => {
-      this.connectedTabs.delete(tabId);
+  async connectToApp(instanceId, spec) {
+    if (this.connected.has(instanceId)) return;
+    const dialer = this.dialers.get(spec.kind);
+    if (!dialer) {
+      throw new Error(`No dialer registered for transport kind "${spec.kind}".`);
+    }
+    const dialed = dialer.dial(spec);
+    this.connected.set(instanceId, dialed);
+    this.handleConnection(dialed.transport, void 0);
+    dialed.onClose(() => {
+      this.connected.delete(instanceId);
     });
     try {
-      await new Promise((resolve, reject) => {
-        ws.once("open", resolve);
-        ws.once(
-          "error",
-          (err) => reject(new Error(`Failed to connect to ${wsUrl}: ${err.message}`))
-        );
-      });
+      await dialed.opened;
     } catch (err) {
-      this.connectedTabs.delete(tabId);
+      this.connected.delete(instanceId);
       throw err;
     }
-    logToStderr(`[tesseron] connected to app tab ${tabId} (${wsUrl})`);
+    logToStderr(`[tesseron] connected to app instance ${instanceId} (${describeSpec(spec)})`);
   }
   /**
-   * Watches `~/.tesseron/tabs/` for per-tab JSON files written by `@tesseron/vite`.
-   * For each new tab file, calls {@link connectToApp}. Returns a cleanup function
-   * that cancels the watcher and polling interval.
+   * Watches `~/.tesseron/instances/` for v2 manifests written by SDK-side
+   * transports. For each new manifest, calls {@link connectToApp} with the
+   * advertised {@link TransportSpec}. Also reads `~/.tesseron/tabs/` for v1
+   * (pre-instances) manifests during the compat window — those get coerced to
+   * `{ kind: 'ws', url: <wsUrl> }`. Returns a cleanup function that cancels
+   * watchers and the polling interval.
    */
-  watchAppsJson() {
-    const tabsDir = (0, import_node_path.join)((0, import_node_os.homedir)(), ".tesseron", "tabs");
+  watchInstances() {
+    const tesseronDir = (0, import_node_path.join)((0, import_node_os.homedir)(), ".tesseron");
+    const instancesDir = (0, import_node_path.join)(tesseronDir, "instances");
+    const legacyTabsDir = (0, import_node_path.join)(tesseronDir, "tabs");
     const checkDir = async () => {
-      if (!(0, import_node_fs.existsSync)(tabsDir)) return;
-      let files;
-      try {
-        files = await (0, import_promises.readdir)(tabsDir);
-      } catch {
-        return;
-      }
-      for (const file2 of files) {
-        if (!file2.endsWith(".json")) continue;
-        const tabId = file2.slice(0, -5);
-        if (this.connectedTabs.has(tabId)) continue;
+      if ((0, import_node_fs.existsSync)(instancesDir)) {
+        let files = [];
         try {
-          const content = await (0, import_promises.readFile)((0, import_node_path.join)(tabsDir, file2), "utf-8");
-          const data = JSON.parse(content);
-          if (typeof data.wsUrl !== "string") continue;
-          this.connectToApp(data.tabId ?? tabId, data.wsUrl).catch((err) => {
-            logToStderr(`[tesseron] could not connect to tab ${tabId}: ${err.message}`);
-          });
+          files = await (0, import_promises.readdir)(instancesDir);
         } catch {
+        }
+        for (const file2 of files) {
+          if (!file2.endsWith(".json")) continue;
+          const instanceId = file2.slice(0, -5);
+          if (this.connected.has(instanceId)) continue;
+          try {
+            const content = await (0, import_promises.readFile)((0, import_node_path.join)(instancesDir, file2), "utf-8");
+            const data = JSON.parse(content);
+            if (data.version !== 2 || !data.transport) continue;
+            const id = data.instanceId ?? instanceId;
+            this.connectToApp(id, data.transport).catch((err) => {
+              logToStderr(`[tesseron] could not connect to instance ${id}: ${err.message}`);
+            });
+          } catch {
+          }
+        }
+      }
+      if ((0, import_node_fs.existsSync)(legacyTabsDir)) {
+        let files = [];
+        try {
+          files = await (0, import_promises.readdir)(legacyTabsDir);
+        } catch {
+        }
+        for (const file2 of files) {
+          if (!file2.endsWith(".json")) continue;
+          const tabId = file2.slice(0, -5);
+          if (this.connected.has(tabId)) continue;
+          try {
+            const content = await (0, import_promises.readFile)((0, import_node_path.join)(legacyTabsDir, file2), "utf-8");
+            const data = JSON.parse(content);
+            if (typeof data.wsUrl !== "string") continue;
+            const id = data.tabId ?? tabId;
+            this.connectToApp(id, { kind: "ws", url: data.wsUrl }).catch((err) => {
+              logToStderr(`[tesseron] could not connect to legacy tab ${id}: ${err.message}`);
+            });
+          } catch {
+          }
         }
       }
     };
     checkDir().catch(() => {
     });
-    if ((0, import_node_fs.existsSync)(tabsDir)) {
+    const watchDir = (dir) => {
+      if (!(0, import_node_fs.existsSync)(dir)) return;
       try {
-        this.appsWatcher = (0, import_node_fs2.watch)(tabsDir, () => {
-          checkDir().catch(() => {
-          });
-        });
-      } catch {
-      }
-    } else {
-      const parent = (0, import_node_path.join)((0, import_node_os.homedir)(), ".tesseron");
-      try {
-        this.appsWatcher = (0, import_node_fs2.watch)(parent, { recursive: false }, (_event, filename) => {
-          if (filename === "tabs" || !filename) {
+        this.discoveryWatchers.push(
+          (0, import_node_fs2.watch)(dir, () => {
             checkDir().catch(() => {
             });
-          }
-        });
+          })
+        );
+      } catch {
+      }
+    };
+    watchDir(instancesDir);
+    watchDir(legacyTabsDir);
+    if (!(0, import_node_fs.existsSync)(instancesDir) && !(0, import_node_fs.existsSync)(legacyTabsDir)) {
+      try {
+        this.discoveryWatchers.push(
+          (0, import_node_fs2.watch)(tesseronDir, { recursive: false }, (_event, filename) => {
+            if (filename === "instances" || filename === "tabs" || !filename) {
+              checkDir().catch(() => {
+              });
+              watchDir(instancesDir);
+              watchDir(legacyTabsDir);
+            }
+          })
+        );
       } catch {
       }
     }
-    this.appsWatchInterval = setInterval(() => {
+    this.discoveryInterval = setInterval(() => {
       checkDir().catch(() => {
       });
     }, 2e3);
-    this.appsWatchInterval.unref?.();
+    this.discoveryInterval.unref?.();
     return () => {
-      this.appsWatcher?.close();
-      this.appsWatcher = void 0;
-      if (this.appsWatchInterval) {
-        clearInterval(this.appsWatchInterval);
-        this.appsWatchInterval = void 0;
+      for (const w of this.discoveryWatchers) {
+        w.close();
+      }
+      this.discoveryWatchers = [];
+      if (this.discoveryInterval) {
+        clearInterval(this.discoveryInterval);
+        this.discoveryInterval = void 0;
       }
     };
+  }
+  /**
+   * @deprecated Use {@link watchInstances}. Kept as an alias for one minor
+   * version (1.1.x) so embedders that called the old name keep working.
+   * Removed in 2.0.
+   */
+  watchAppsJson() {
+    return this.watchInstances();
   }
   /** Sessions that have completed the claim flow and are exposed to the MCP client. */
   getClaimedSessions() {
@@ -19427,27 +19618,26 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       }
     };
   }
-  handleConnection(ws, origin) {
+  /**
+   * Wires up a freshly-dialed (or freshly-accepted) {@link Transport} for a
+   * single Tesseron session. Public so embedders that bypass the standard
+   * dialers (e.g. an in-memory transport in tests) can attach a session
+   * directly. `origin` is supplied by WS-binding code that knows the upgrade
+   * request's `Origin` header; UDS and stdio bindings pass `undefined`.
+   */
+  handleConnection(transport, origin) {
     const dispatcher = new JsonRpcDispatcher((message) => {
       try {
-        ws.send(JSON.stringify(message));
+        transport.send(message);
       } catch {
       }
     });
     let session;
-    ws.on("message", (data) => {
-      const text = rawDataToString(data);
-      if (!text) return;
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        return;
-      }
+    transport.onMessage((parsed) => {
       dispatcher.receive(parsed);
     });
-    ws.on("close", () => {
-      dispatcher.rejectAllPending(new TransportClosedError("Session socket closed"));
+    transport.onClose(() => {
+      dispatcher.rejectAllPending(new TransportClosedError("Session channel closed"));
       if (!session) return;
       const resumeTtl = this.options.resumeTtlMs ?? DEFAULT_RESUME_TTL_MS;
       const maxZombies = this.options.maxZombies ?? DEFAULT_MAX_ZOMBIES;
@@ -19515,7 +19705,7 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       session = {
         id: sessionId,
         app: helloParams.app,
-        ws,
+        transport,
         dispatcher,
         actions: helloParams.actions,
         resources: helloParams.resources,
@@ -19552,7 +19742,7 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       if (session) {
         throw new TesseronError(
           TesseronErrorCode.InvalidRequest,
-          "This socket is already attached to a session. Send tesseron/resume on a fresh connection."
+          "This channel is already attached to a session. Send tesseron/resume on a fresh connection."
         );
       }
       if (typeof resumeParams.sessionId !== "string" || typeof resumeParams.resumeToken !== "string" || typeof resumeParams.protocolVersion !== "string" || !resumeParams.app || typeof resumeParams.app.id !== "string" || !Array.isArray(resumeParams.actions) || !Array.isArray(resumeParams.resources) || !resumeParams.capabilities || typeof resumeParams.capabilities !== "object") {
@@ -19601,8 +19791,8 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
           `Session "${resumeParams.sessionId}" was never claimed; open a fresh session with tesseron/hello instead.`
         );
       }
-      const presented = import_node_buffer.Buffer.from(resumeParams.resumeToken);
-      const stored = import_node_buffer.Buffer.from(zombie.resumeToken);
+      const presented = import_node_buffer2.Buffer.from(resumeParams.resumeToken);
+      const stored = import_node_buffer2.Buffer.from(zombie.resumeToken);
       if (presented.length !== stored.length || !(0, import_node_crypto2.timingSafeEqual)(presented, stored)) {
         throw new TesseronError(
           TesseronErrorCode.ResumeFailed,
@@ -19613,7 +19803,7 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       this.zombieSessions.delete(zombie.id);
       if (origin && resumeParams.app.origin !== origin) {
         logToStderr(
-          `[tesseron] resume origin mismatch for session ${zombie.id}: stored=${zombie.app.origin} declared=${resumeParams.app.origin} socket=${origin} \u2014 rewriting to socket origin`
+          `[tesseron] resume origin mismatch for session ${zombie.id}: stored=${zombie.app.origin} declared=${resumeParams.app.origin} channel=${origin} \u2014 rewriting to channel origin`
         );
         resumeParams.app.origin = origin;
       }
@@ -19621,7 +19811,7 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       session = {
         id: zombie.id,
         app: resumeParams.app,
-        ws,
+        transport,
         dispatcher,
         actions: resumeParams.actions,
         resources: resumeParams.resources,
@@ -19707,16 +19897,12 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
     });
   }
 };
-function rawDataToString(data) {
-  if (typeof data === "string") return data;
-  if (import_node_buffer.Buffer.isBuffer(data)) return data.toString("utf-8");
-  if (Array.isArray(data)) return import_node_buffer.Buffer.concat(data).toString("utf-8");
-  if (data instanceof ArrayBuffer) return import_node_buffer.Buffer.from(data).toString("utf-8");
-  return null;
-}
 function logToStderr(message) {
   process.stderr.write(`${message}
 `);
+}
+function describeSpec(spec) {
+  return spec.kind === "ws" ? spec.url : spec.path;
 }
 function parseProtocolVersion(version2) {
   const parts = version2.split(".");

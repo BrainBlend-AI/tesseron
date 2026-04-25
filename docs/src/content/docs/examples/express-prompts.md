@@ -16,7 +16,7 @@ related:
 pnpm --filter express-prompts dev
 # REST on http://localhost:3001
 # @tesseron/server binds its WS endpoint on a random loopback port and writes
-# ~/.tesseron/tabs/<tabId>.json; the gateway dials it in. No port to configure.
+# ~/.tesseron/instances/<instanceId>.json; the gateway dials it in. No port to configure.
 ```
 
 ## Domain

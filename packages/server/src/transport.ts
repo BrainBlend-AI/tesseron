@@ -10,17 +10,17 @@ import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 const GATEWAY_SUBPROTOCOL = 'tesseron-gateway';
 
 /**
- * Resolves the tab-discovery directory on every call rather than at module
- * load. Tests (and long-lived processes that change `$HOME` at runtime) need
- * this — capturing at load time meant a test sandbox set via `process.env.HOME`
- * before `beforeAll` was ignored because the module had already been evaluated.
+ * Resolves the instance-discovery directory on every call rather than at
+ * module load. Tests (and long-lived processes that change `$HOME` at runtime)
+ * need this — capturing at load time meant a sandbox set via
+ * `process.env.HOME` before `beforeAll` was ignored.
  */
-function getTabsDir(): string {
-  return join(homedir(), '.tesseron', 'tabs');
+function getInstancesDir(): string {
+  return join(homedir(), '.tesseron', 'instances');
 }
 
-function generateTabId(): string {
-  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+function generateInstanceId(): string {
+  return `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export interface NodeWebSocketServerTransportOptions {
@@ -34,10 +34,10 @@ export interface NodeWebSocketServerTransportOptions {
 
 /**
  * Transport that hosts a one-shot WebSocket server on loopback and announces
- * itself to the Tesseron gateway by writing `~/.tesseron/tabs/<tabId>.json`.
- * The gateway watches that directory, dials the advertised URL (using the
- * `tesseron-gateway` WS subprotocol), and the two ends then exchange the
- * standard Tesseron JSON-RPC traffic.
+ * itself to the Tesseron gateway by writing `~/.tesseron/instances/<instanceId>.json`
+ * with a `{ kind: 'ws', url }` spec. The gateway watches that directory, dials
+ * the advertised URL (using the `tesseron-gateway` WS subprotocol), and the
+ * two ends then exchange the standard Tesseron JSON-RPC traffic.
  *
  * The server accepts exactly one connection — the first client speaking the
  * `tesseron-gateway` subprotocol wins. Subsequent upgrade attempts are rejected.
@@ -46,18 +46,18 @@ export class NodeWebSocketServerTransport implements Transport {
   private readonly messageHandlers: Array<(message: unknown) => void> = [];
   private readonly closeHandlers: Array<(reason?: string) => void> = [];
   private readonly opened: Promise<void>;
-  private readonly tabId: string;
+  private readonly instanceId: string;
   private readonly options: NodeWebSocketServerTransportOptions;
   private server?: Server;
   private wss?: WebSocketServer;
   private ws?: WebSocket;
-  private tabFile?: string;
+  private manifestFile?: string;
   /** Messages queued before the gateway dials in. Drained on connection. */
   private readonly sendQueue: string[] = [];
 
   constructor(options: NodeWebSocketServerTransportOptions = {}) {
     this.options = options;
-    this.tabId = generateTabId();
+    this.instanceId = generateInstanceId();
     this.opened = this.listen();
   }
 
@@ -98,7 +98,7 @@ export class NodeWebSocketServerTransport implements Transport {
       throw new Error('Failed to obtain listening address');
     }
     const wsUrl = `ws://${host}:${addr.port}/`;
-    await this.writeTabFile(wsUrl);
+    await this.writeManifest(wsUrl);
   }
 
   private attachGateway(ws: WebSocket): void {
@@ -136,21 +136,21 @@ export class NodeWebSocketServerTransport implements Transport {
     });
   }
 
-  private async writeTabFile(wsUrl: string): Promise<void> {
-    const tabsDir = getTabsDir();
-    if (!existsSync(tabsDir)) {
-      await mkdir(tabsDir, { recursive: true });
+  private async writeManifest(wsUrl: string): Promise<void> {
+    const instancesDir = getInstancesDir();
+    if (!existsSync(instancesDir)) {
+      await mkdir(instancesDir, { recursive: true });
     }
-    this.tabFile = join(tabsDir, `${this.tabId}.json`);
+    this.manifestFile = join(instancesDir, `${this.instanceId}.json`);
     await writeFile(
-      this.tabFile,
+      this.manifestFile,
       JSON.stringify(
         {
-          version: 1,
-          tabId: this.tabId,
+          version: 2,
+          instanceId: this.instanceId,
           appName: this.options.appName ?? 'node',
-          wsUrl,
           addedAt: Date.now(),
+          transport: { kind: 'ws', url: wsUrl },
         },
         null,
         2,
@@ -158,7 +158,7 @@ export class NodeWebSocketServerTransport implements Transport {
     );
   }
 
-  /** Resolves once the WS server is listening and the tab file has been written. */
+  /** Resolves once the WS server is listening and the instance manifest has been written. */
   async ready(): Promise<void> {
     await this.opened;
   }
@@ -181,8 +181,8 @@ export class NodeWebSocketServerTransport implements Transport {
   }
 
   close(reason?: string): void {
-    if (this.tabFile && existsSync(this.tabFile)) {
-      unlink(this.tabFile).catch(() => {});
+    if (this.manifestFile && existsSync(this.manifestFile)) {
+      unlink(this.manifestFile).catch(() => {});
     }
     this.ws?.close(1000, reason);
     this.wss?.close();

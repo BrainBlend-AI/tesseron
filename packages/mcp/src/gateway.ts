@@ -10,6 +10,7 @@ import {
   type ElicitationRequestParams,
   type ElicitationResult,
   type HelloParams,
+  type InstanceManifest,
   PROTOCOL_VERSION,
   type ProgressUpdate,
   type ResourceReadResult,
@@ -18,11 +19,13 @@ import {
   type SamplingResult,
   TesseronError,
   TesseronErrorCode,
+  type Transport,
   TransportClosedError,
+  type TransportSpec,
   type WelcomeResult,
 } from '@tesseron/core';
 import { JsonRpcDispatcher } from '@tesseron/core/internal';
-import { type RawData, WebSocket } from 'ws';
+import { type DialedTransport, type GatewayDialer, UdsDialer, WsDialer } from './dialer.js';
 import {
   type Session,
   generateClaimCode,
@@ -48,6 +51,12 @@ export interface GatewayOptions {
    * rapidly connects and disconnects can't accumulate unbounded memory.
    */
   maxZombies?: number;
+  /**
+   * Override the set of dialers the gateway uses. Defaults to the built-in
+   * `WsDialer` + `UdsDialer`. Tests pass a single in-memory dialer; downstream
+   * embedders can register additional bindings.
+   */
+  dialers?: GatewayDialer[];
 }
 
 /** Options for {@link TesseronGateway.invokeAction}. */
@@ -125,9 +134,6 @@ const DEFAULT_AGENT_CAPABILITIES: AgentCapabilityInfo = {
   elicitation: false,
 };
 
-/** WebSocket subprotocol the gateway uses when connecting outbound to a Vite plugin tab. */
-const GATEWAY_SUBPROTOCOL = 'tesseron-gateway';
-
 interface ActiveInvocation {
   sessionId: string;
   options: InvokeActionOptions;
@@ -137,7 +143,7 @@ interface ActiveInvocation {
 /**
  * A recently-closed session retained in memory so a reconnecting SDK can
  * rejoin it via `tesseron/resume`. Carries only the metadata the resume
- * handler needs — the dead WebSocket and its dispatcher are deliberately
+ * handler needs — the dead transport and its dispatcher are deliberately
  * dropped so we never try to write to them.
  */
 interface ZombieSession {
@@ -156,10 +162,10 @@ interface ZombieSession {
 
 /**
  * Bridge between claimed Tesseron sessions and the MCP server exposed to the agent.
- * The gateway is a WebSocket *client*: it discovers running apps by watching
- * {@link watchAppsJson} (`~/.tesseron/tabs/`) and dials each one's WebSocket
- * endpoint with the `tesseron-gateway` subprotocol. Emits `sessions-changed`
- * whenever a session is claimed or its owning socket closes.
+ * The gateway is a transport *client*: it discovers running apps by watching
+ * `~/.tesseron/instances/` (and `~/.tesseron/tabs/` for v1 compat) and dials each
+ * one's advertised binding (WS, UDS, …) via a registered {@link GatewayDialer}.
+ * Emits `sessions-changed` whenever a session is claimed or its owning channel closes.
  */
 export class TesseronGateway extends EventEmitter {
   private readonly sessions = new Map<string, Session>();
@@ -171,27 +177,33 @@ export class TesseronGateway extends EventEmitter {
    */
   private readonly zombieSessions = new Map<string, ZombieSession>();
   /**
-   * Flipped true by {@link stop} so in-flight `ws.on('close')` events queued by
+   * Flipped true by {@link stop} so in-flight transport-close events queued by
    * shutdown skip re-inserting zombies into the map we just cleared.
    */
   private stopped = false;
   private samplingHandler?: SamplingHandler;
   private elicitationHandler?: ElicitationHandler;
   private agentCapabilities: AgentCapabilityInfo = { ...DEFAULT_AGENT_CAPABILITIES };
-  /** Tab IDs already connected via {@link watchAppsJson} so we don't double-connect. */
-  private readonly connectedTabs = new Map<string, WebSocket>();
-  private appsWatcher?: ReturnType<typeof watch>;
-  private appsWatchInterval?: ReturnType<typeof setInterval>;
+  /** Instance IDs already connected via {@link watchInstances} so we don't double-connect. */
+  private readonly connected = new Map<string, DialedTransport>();
+  private readonly dialers: Map<TransportSpec['kind'], GatewayDialer>;
+  private discoveryWatchers: Array<ReturnType<typeof watch>> = [];
+  private discoveryInterval?: ReturnType<typeof setInterval>;
 
   constructor(private readonly options: GatewayOptions = {}) {
     super();
+    this.dialers = new Map();
+    const builtIns = options.dialers ?? [new WsDialer(), new UdsDialer()];
+    for (const dialer of builtIns) {
+      this.dialers.set(dialer.kind, dialer);
+    }
   }
 
-  /** Closes all sessions, outbound connections, and the tabs-dir watcher. */
+  /** Closes all sessions, outbound connections, and discovery watchers. */
   async stop(): Promise<void> {
     this.stopped = true;
     for (const session of this.sessions.values()) {
-      session.ws.close(1001, 'Gateway shutting down');
+      session.transport.close('Gateway shutting down');
     }
     this.sessions.clear();
     this.pendingClaims.clear();
@@ -200,16 +212,18 @@ export class TesseronGateway extends EventEmitter {
       clearTimeout(zombie.evictTimer);
     }
     this.zombieSessions.clear();
-    this.appsWatcher?.close();
-    this.appsWatcher = undefined;
-    if (this.appsWatchInterval) {
-      clearInterval(this.appsWatchInterval);
-      this.appsWatchInterval = undefined;
+    for (const w of this.discoveryWatchers) {
+      w.close();
     }
-    for (const ws of this.connectedTabs.values()) {
-      ws.close(1001, 'Gateway shutting down');
+    this.discoveryWatchers = [];
+    if (this.discoveryInterval) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = undefined;
     }
-    this.connectedTabs.clear();
+    for (const dialed of this.connected.values()) {
+      dialed.close('Gateway shutting down');
+    }
+    this.connected.clear();
   }
 
   /** Installs the handler invoked for `sampling/request`. Pass `undefined` to clear. */
@@ -242,118 +256,166 @@ export class TesseronGateway extends EventEmitter {
   }
 
   /**
-   * Connects outbound to a Tesseron Vite plugin tab endpoint. The gateway becomes the
-   * WebSocket client; the Vite plugin bridges it to the browser tab. The session
-   * lifecycle (tesseron/hello, resume, zombie TTL) is identical to inbound connections.
+   * Connects outbound to a Tesseron app instance using the binding described
+   * by `spec`. The gateway becomes the transport client; the app accepts the
+   * single inbound connection. The session lifecycle (tesseron/hello, resume,
+   * zombie TTL) is identical regardless of which binding ships the bytes.
    *
-   * @param tabId - Unique ID assigned by the Vite plugin, used to deduplicate.
-   * @param wsUrl - Full WebSocket URL to connect to, e.g. `ws://127.0.0.1:5173/@tesseron/ws/tab-abc`.
+   * @param instanceId - Unique ID assigned by the SDK side; used to deduplicate.
+   * @param spec - {@link TransportSpec} discriminating which dialer to use.
    */
-  async connectToApp(tabId: string, wsUrl: string): Promise<void> {
-    if (this.connectedTabs.has(tabId)) return;
-    const ws = new WebSocket(wsUrl, [GATEWAY_SUBPROTOCOL]);
-    // Reserve the slot immediately so concurrent watchAppsJson ticks don't double-connect.
-    this.connectedTabs.set(tabId, ws);
-
-    // Register the dispatcher and message handlers BEFORE awaiting 'open'.
-    // When gateway and SDK share a process, the SDK's attachGateway() runs
-    // synchronously inside handleUpgrade and sends `tesseron/hello` before the
-    // client-side 'open' event fires. If we waited for 'open' before wiring
-    // ws.on('message'), that frame would be emitted with no listener and
-    // silently dropped — the SDK's connect() then hangs waiting for a welcome
-    // that never comes. Subprocess dialling has enough cross-process latency
-    // to hide the race, which is why it only surfaced under in-process use.
-    this.handleConnection(ws, undefined);
-    ws.once('close', () => {
-      this.connectedTabs.delete(tabId);
+  async connectToApp(instanceId: string, spec: TransportSpec): Promise<void> {
+    if (this.connected.has(instanceId)) return;
+    const dialer = this.dialers.get(spec.kind);
+    if (!dialer) {
+      throw new Error(`No dialer registered for transport kind "${spec.kind}".`);
+    }
+    // Synchronously dial and register handlers BEFORE awaiting opened, so an
+    // in-process peer that fires `tesseron/hello` synchronously inside its
+    // own upgrade handler isn't dropped on the floor (see WsDialer comment).
+    const dialed = dialer.dial(spec as never);
+    this.connected.set(instanceId, dialed);
+    this.handleConnection(dialed.transport, undefined);
+    dialed.onClose(() => {
+      this.connected.delete(instanceId);
     });
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        ws.once('open', resolve);
-        ws.once('error', (err: Error) =>
-          reject(new Error(`Failed to connect to ${wsUrl}: ${err.message}`)),
-        );
-      });
+      await dialed.opened;
     } catch (err) {
-      this.connectedTabs.delete(tabId);
+      this.connected.delete(instanceId);
       throw err;
     }
-    logToStderr(`[tesseron] connected to app tab ${tabId} (${wsUrl})`);
+    logToStderr(`[tesseron] connected to app instance ${instanceId} (${describeSpec(spec)})`);
   }
 
   /**
-   * Watches `~/.tesseron/tabs/` for per-tab JSON files written by `@tesseron/vite`.
-   * For each new tab file, calls {@link connectToApp}. Returns a cleanup function
-   * that cancels the watcher and polling interval.
+   * Watches `~/.tesseron/instances/` for v2 manifests written by SDK-side
+   * transports. For each new manifest, calls {@link connectToApp} with the
+   * advertised {@link TransportSpec}. Also reads `~/.tesseron/tabs/` for v1
+   * (pre-instances) manifests during the compat window — those get coerced to
+   * `{ kind: 'ws', url: <wsUrl> }`. Returns a cleanup function that cancels
+   * watchers and the polling interval.
    */
-  watchAppsJson(): () => void {
-    const tabsDir = join(homedir(), '.tesseron', 'tabs');
+  watchInstances(): () => void {
+    const tesseronDir = join(homedir(), '.tesseron');
+    const instancesDir = join(tesseronDir, 'instances');
+    const legacyTabsDir = join(tesseronDir, 'tabs');
 
     const checkDir = async (): Promise<void> => {
-      if (!existsSync(tabsDir)) return;
-      let files: string[];
-      try {
-        files = await readdir(tabsDir);
-      } catch {
-        return;
-      }
-      for (const file of files) {
-        if (!file.endsWith('.json')) continue;
-        const tabId = file.slice(0, -5);
-        if (this.connectedTabs.has(tabId)) continue;
+      // v2 manifests: ~/.tesseron/instances/<instanceId>.json
+      if (existsSync(instancesDir)) {
+        let files: string[] = [];
         try {
-          const content = await readFile(join(tabsDir, file), 'utf-8');
-          const data = JSON.parse(content) as { version: number; tabId: string; wsUrl: string };
-          if (typeof data.wsUrl !== 'string') continue;
-          this.connectToApp(data.tabId ?? tabId, data.wsUrl).catch((err: Error) => {
-            logToStderr(`[tesseron] could not connect to tab ${tabId}: ${err.message}`);
-          });
+          files = await readdir(instancesDir);
         } catch {
-          // Malformed file or race with deletion — skip
+          // ignore
+        }
+        for (const file of files) {
+          if (!file.endsWith('.json')) continue;
+          const instanceId = file.slice(0, -5);
+          if (this.connected.has(instanceId)) continue;
+          try {
+            const content = await readFile(join(instancesDir, file), 'utf-8');
+            const data = JSON.parse(content) as Partial<InstanceManifest>;
+            if (data.version !== 2 || !data.transport) continue;
+            const id = data.instanceId ?? instanceId;
+            this.connectToApp(id, data.transport).catch((err: Error) => {
+              logToStderr(`[tesseron] could not connect to instance ${id}: ${err.message}`);
+            });
+          } catch {
+            // malformed file or race with deletion — skip
+          }
+        }
+      }
+
+      // v1 compat: ~/.tesseron/tabs/<tabId>.json — coerce to ws spec.
+      // SDKs at v1.0 wrote these; v1.1+ writes only `instances/`. Drop in v2.0.
+      if (existsSync(legacyTabsDir)) {
+        let files: string[] = [];
+        try {
+          files = await readdir(legacyTabsDir);
+        } catch {
+          // ignore
+        }
+        for (const file of files) {
+          if (!file.endsWith('.json')) continue;
+          const tabId = file.slice(0, -5);
+          if (this.connected.has(tabId)) continue;
+          try {
+            const content = await readFile(join(legacyTabsDir, file), 'utf-8');
+            const data = JSON.parse(content) as { tabId?: string; wsUrl?: string };
+            if (typeof data.wsUrl !== 'string') continue;
+            const id = data.tabId ?? tabId;
+            this.connectToApp(id, { kind: 'ws', url: data.wsUrl }).catch((err: Error) => {
+              logToStderr(`[tesseron] could not connect to legacy tab ${id}: ${err.message}`);
+            });
+          } catch {
+            // malformed file or race with deletion — skip
+          }
         }
       }
     };
 
     checkDir().catch(() => {});
 
-    // Watch the tabs directory for new files (event-driven, fast)
-    if (existsSync(tabsDir)) {
+    const watchDir = (dir: string): void => {
+      if (!existsSync(dir)) return;
       try {
-        this.appsWatcher = watch(tabsDir, () => {
-          checkDir().catch(() => {});
-        });
-      } catch {
-        // fs.watch unavailable; fall through to polling only
-      }
-    } else {
-      // Directory doesn't exist yet; watch parent and re-try when it's created
-      const parent = join(homedir(), '.tesseron');
-      try {
-        this.appsWatcher = watch(parent, { recursive: false }, (_event, filename) => {
-          if (filename === 'tabs' || !filename) {
+        this.discoveryWatchers.push(
+          watch(dir, () => {
             checkDir().catch(() => {});
-          }
-        });
+          }),
+        );
       } catch {
-        // ignore
+        // fs.watch unavailable on this dir; rely on polling fallback
+      }
+    };
+    watchDir(instancesDir);
+    watchDir(legacyTabsDir);
+
+    // If neither directory exists yet, watch the parent for either subdir to appear.
+    if (!existsSync(instancesDir) && !existsSync(legacyTabsDir)) {
+      try {
+        this.discoveryWatchers.push(
+          watch(tesseronDir, { recursive: false }, (_event, filename) => {
+            if (filename === 'instances' || filename === 'tabs' || !filename) {
+              checkDir().catch(() => {});
+              watchDir(instancesDir);
+              watchDir(legacyTabsDir);
+            }
+          }),
+        );
+      } catch {
+        // ignore — polling fallback covers this
       }
     }
 
-    // Polling fallback for platform quirks (Windows occasionally misses fs.watch events)
-    this.appsWatchInterval = setInterval(() => {
+    // Polling fallback for platform quirks (Windows occasionally misses fs.watch events).
+    this.discoveryInterval = setInterval(() => {
       checkDir().catch(() => {});
     }, 2_000);
-    this.appsWatchInterval.unref?.();
+    this.discoveryInterval.unref?.();
 
     return () => {
-      this.appsWatcher?.close();
-      this.appsWatcher = undefined;
-      if (this.appsWatchInterval) {
-        clearInterval(this.appsWatchInterval);
-        this.appsWatchInterval = undefined;
+      for (const w of this.discoveryWatchers) {
+        w.close();
+      }
+      this.discoveryWatchers = [];
+      if (this.discoveryInterval) {
+        clearInterval(this.discoveryInterval);
+        this.discoveryInterval = undefined;
       }
     };
+  }
+
+  /**
+   * @deprecated Use {@link watchInstances}. Kept as an alias for one minor
+   * version (1.1.x) so embedders that called the old name keep working.
+   * Removed in 2.0.
+   */
+  watchAppsJson(): () => void {
+    return this.watchInstances();
   }
 
   /** Sessions that have completed the claim flow and are exposed to the MCP client. */
@@ -496,34 +558,33 @@ export class TesseronGateway extends EventEmitter {
     };
   }
 
-  private handleConnection(ws: WebSocket, origin?: string): void {
+  /**
+   * Wires up a freshly-dialed (or freshly-accepted) {@link Transport} for a
+   * single Tesseron session. Public so embedders that bypass the standard
+   * dialers (e.g. an in-memory transport in tests) can attach a session
+   * directly. `origin` is supplied by WS-binding code that knows the upgrade
+   * request's `Origin` header; UDS and stdio bindings pass `undefined`.
+   */
+  handleConnection(transport: Transport, origin?: string): void {
     const dispatcher = new JsonRpcDispatcher((message) => {
       try {
-        ws.send(JSON.stringify(message));
+        transport.send(message);
       } catch {
-        // socket likely closed; ignore
+        // channel likely closed; ignore
       }
     });
 
     let session: Session | undefined;
 
-    ws.on('message', (data: RawData) => {
-      const text = rawDataToString(data);
-      if (!text) return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        return;
-      }
+    transport.onMessage((parsed) => {
       dispatcher.receive(parsed);
     });
 
-    ws.on('close', () => {
+    transport.onClose(() => {
       // Mirrors the SDK-side rejectAllPending in TesseronClient: without it,
-      // any gateway->SDK request in flight when the socket dies never settles,
+      // any gateway->SDK request in flight when the channel dies never settles,
       // and the MCP client's tool call hangs until its own timeout expires.
-      dispatcher.rejectAllPending(new TransportClosedError('Session socket closed'));
+      dispatcher.rejectAllPending(new TransportClosedError('Session channel closed'));
 
       if (!session) return;
 
@@ -585,7 +646,7 @@ export class TesseronGateway extends EventEmitter {
       validateAppId(helloParams.app.id);
 
       // Protocol version handshake — hard-reject on major mismatch, warn
-      // on minor so 0.1.x ↔ 0.2.x connections still work during the transition
+      // on minor so 1.0.x ↔ 1.1.x connections still work during the transition
       // while users rebuild their plugin bundle.
       const [theirMajor, theirMinor] = parseProtocolVersion(helloParams.protocolVersion);
       const [ourMajor, ourMinor] = parseProtocolVersion(PROTOCOL_VERSION);
@@ -611,7 +672,7 @@ export class TesseronGateway extends EventEmitter {
       session = {
         id: sessionId,
         app: helloParams.app,
-        ws,
+        transport,
         dispatcher,
         actions: helloParams.actions,
         resources: helloParams.resources,
@@ -654,7 +715,7 @@ export class TesseronGateway extends EventEmitter {
         // SDK fallback-on-ResumeFailed logic doesn't loop on a malformed call.
         throw new TesseronError(
           TesseronErrorCode.InvalidRequest,
-          'This socket is already attached to a session. Send tesseron/resume on a fresh connection.',
+          'This channel is already attached to a session. Send tesseron/resume on a fresh connection.',
         );
       }
 
@@ -749,18 +810,18 @@ export class TesseronGateway extends EventEmitter {
       }
 
       // Token validated. Cancel eviction, remove zombie, promote to live
-      // session with the fresh socket + dispatcher, and rotate the token.
+      // session with the fresh transport + dispatcher, and rotate the token.
       clearTimeout(zombie.evictTimer);
       this.zombieSessions.delete(zombie.id);
 
       if (origin && resumeParams.app.origin !== origin) {
-        // The socket's Origin header is the authoritative value (it's what the
+        // The channel's Origin header is the authoritative value (it's what the
         // gateway already allowlisted during the WS upgrade). Log the mismatch
         // against the zombie's stored origin — a drift here can indicate a
         // misconfigured build (staging bundle dialing a prod gateway, or a
         // tenant swap) and otherwise leaves no forensic trail.
         logToStderr(
-          `[tesseron] resume origin mismatch for session ${zombie.id}: stored=${zombie.app.origin} declared=${resumeParams.app.origin} socket=${origin} — rewriting to socket origin`,
+          `[tesseron] resume origin mismatch for session ${zombie.id}: stored=${zombie.app.origin} declared=${resumeParams.app.origin} channel=${origin} — rewriting to channel origin`,
         );
         resumeParams.app.origin = origin;
       }
@@ -769,7 +830,7 @@ export class TesseronGateway extends EventEmitter {
       session = {
         id: zombie.id,
         app: resumeParams.app,
-        ws,
+        transport,
         dispatcher,
         actions: resumeParams.actions,
         resources: resumeParams.resources,
@@ -884,16 +945,12 @@ export class TesseronGateway extends EventEmitter {
   }
 }
 
-function rawDataToString(data: RawData): string | null {
-  if (typeof data === 'string') return data;
-  if (Buffer.isBuffer(data)) return data.toString('utf-8');
-  if (Array.isArray(data)) return Buffer.concat(data).toString('utf-8');
-  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf-8');
-  return null;
-}
-
 function logToStderr(message: string): void {
   process.stderr.write(`${message}\n`);
+}
+
+function describeSpec(spec: TransportSpec): string {
+  return spec.kind === 'ws' ? spec.url : spec.path;
 }
 
 function parseProtocolVersion(version: string): [number, number] {

@@ -33,11 +33,13 @@ import {
   CancelledError, TimeoutError,
   TesseronErrorCode,   // numeric enum: InputValidation = -32004, etc.
   // Protocol constants & types.
-  PROTOCOL_VERSION,    // '1.0.0'
+  PROTOCOL_VERSION,    // '1.1.0'
   HelloParams, WelcomeResult, TesseronCapabilities,
   AppMetadata, AgentIdentity, ActionAnnotations,
   ActionInvokeParams, ActionProgressParams, ActionCancelParams,
   ResourceReadParams, ResourceSubscribeParams, ResourceUpdatedParams,
+  // v1.1 multi-binding additions.
+  TransportSpec, InstanceManifest,
 } from '@tesseron/core';
 ```
 

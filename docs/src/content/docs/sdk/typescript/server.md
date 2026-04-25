@@ -1,9 +1,11 @@
 ---
 title: "@tesseron/server"
-description: The Node SDK. Binds a loopback WebSocket server, announces itself via ~/.tesseron/tabs/, and waits for the gateway to dial in.
+description: The Node SDK. Hosts a loopback WebSocket or Unix domain socket, announces itself via ~/.tesseron/instances/, and waits for the gateway to dial in.
 related:
   - sdk/typescript/core
   - protocol/transport
+  - protocol/transport-bindings/ws
+  - protocol/transport-bindings/uds
   - sdk/typescript/action-builder
 ---
 
@@ -11,14 +13,19 @@ related:
 
 ## How it connects
 
-Unlike the browser SDK, Node can bind ports. `@tesseron/server` uses that directly:
+Unlike the browser SDK, Node can host its own listener. `@tesseron/server` ships two transport bindings and picks one based on `connect()` options:
 
-1. On `tesseron.connect()` it creates a WebSocket server on `127.0.0.1` with an OS-picked port.
-2. Writes `~/.tesseron/tabs/<tabId>.json` with the URL it bound.
-3. Waits for the gateway to dial in with the `tesseron-gateway` subprotocol.
+- **WebSocket on loopback** (default). Binds `127.0.0.1` on an OS-picked port.
+- **Unix domain socket**, opt-in via `tesseron.connect({ transport: 'uds' })`. Linux + macOS only; falls back to WS on Windows.
+
+Either way the connection flow is the same:
+
+1. On `tesseron.connect()` the SDK creates the host endpoint.
+2. Writes `~/.tesseron/instances/<instanceId>.json` with a `{ kind, url | path }` spec.
+3. Waits for the gateway to dial in.
 4. On the first and only accepted connection, sends `tesseron/hello` and runs the normal Tesseron handshake.
 
-No environment variables, no fixed ports, no client URL. The discovery file does everything.
+No environment variables, no fixed ports, no client URL. The instance manifest does everything.
 
 ## When to use server vs web
 
@@ -38,10 +45,12 @@ import {
   tesseron,
   // Class (if you need multiple clients per process).
   ServerTesseronClient,
-  // Transport — WS server + tab file writer.
+  // WS-binding transport — WS server + manifest writer.
   NodeWebSocketServerTransport,
-  // Transport options (appName, host, port).
   type NodeWebSocketServerTransportOptions,
+  // UDS-binding transport — net server + manifest writer.
+  UnixSocketServerTransport,
+  type UnixSocketServerTransportOptions,
 } from '@tesseron/server';
 ```
 
@@ -86,15 +95,26 @@ process.on('SIGTERM', shutdown);
 
 ## Customising the bind
 
-Pass options to `connect()` if you need them:
+### WebSocket binding (default)
 
 ```ts
 await tesseron.connect({ appName: 'notes_api', host: '127.0.0.1', port: 0 });
 ```
 
-- `appName` - stamped into the tab discovery file so the gateway log names your app usefully. Defaults to `'node'`.
+- `appName` - stamped into the instance manifest so the gateway log names your app usefully. Defaults to `'node'`.
 - `host` - always `127.0.0.1` in practice; exposed for tests that need `::1`.
 - `port` - `0` (OS picks) is almost always what you want. Setting a fixed port only matters if you're reverse-tunnelling the transport.
+
+### UDS binding
+
+```ts
+await tesseron.connect({ transport: 'uds', appName: 'notes_api' });
+// or, override the socket path:
+await tesseron.connect({ transport: 'uds', path: '/tmp/notes.sock' });
+```
+
+- `appName` - same as WS.
+- `path` - omit to let the SDK create a per-process 0700 temp dir under `os.tmpdir()` and bind `<dir>/sock` inside (recommended; the parent dir is the access gate). Pin a path only if you need to coordinate with another process that expects it.
 
 Pass a `Transport` instead to bypass bind-and-announce entirely - useful in tests or when you're piping frames through some other channel.
 
@@ -119,19 +139,35 @@ tesseron.action('addPrompt')
 
 ## Transport details
 
-`NodeWebSocketServerTransport` wraps the [`ws`](https://github.com/websockets/ws) npm package (v8). It:
+### `NodeWebSocketServerTransport` (WS binding)
+
+Wraps the [`ws`](https://github.com/websockets/ws) npm package (v8). It:
 
 - Binds a WebSocket server via Node's built-in `http.createServer`.
 - Accepts exactly one upgrade request that advertises the `tesseron-gateway` subprotocol; every other upgrade attempt is destroyed.
 - Tolerates every frame shape `ws` hands back - `string`, `Buffer`, `Buffer[]`, `ArrayBuffer` - and coerces to UTF-8 before parsing.
-- Writes its tab file on `listen()` and deletes it on `close()`.
+- Writes its instance manifest on `listen()` and deletes it on `close()`.
+
+See the [WebSocket binding spec](/protocol/transport-bindings/ws/) for the wire-level rules.
+
+### `UnixSocketServerTransport` (UDS binding)
+
+Wraps Node's `net` module. It:
+
+- Creates a private (mode `0700`) directory under `os.tmpdir()` and binds a socket inside it (or uses the path you supplied).
+- `chmod 0600`s the socket file after bind, so the inode rejects connect attempts from other UIDs.
+- Accepts exactly one connection; rejects subsequent connect attempts.
+- Frames messages as NDJSON: `JSON.stringify(msg) + '\n'` per outbound, `\n`-split on inbound.
+- Writes its instance manifest on bind and deletes it (plus the temp dir) on `close()`.
+
+See the [UDS binding spec](/protocol/transport-bindings/uds/) for the wire-level rules and the Windows limitation.
 
 ## Running under Docker / systemd
 
 Two things to get right:
 
-1. **Same HOME dir as the gateway.** The gateway reads `~/.tesseron/tabs/`; your Node process has to write there. In containers, mount `~/.tesseron` into the container's `$HOME`.
-2. **Signal handling.** `process.on('SIGTERM', …)` to call `tesseron.disconnect()` before exit cleans up the tab file and gives the gateway a clean close (code 1001) so the agent doesn't see abrupt tool failures.
+1. **Same HOME dir as the gateway.** The gateway reads `~/.tesseron/instances/`; your Node process has to write there. In containers, mount `~/.tesseron` into the container's `$HOME`.
+2. **Signal handling.** `process.on('SIGTERM', …)` to call `tesseron.disconnect()` before exit cleans up the manifest and gives the gateway a clean close (code 1001 on WS, normal `'close'` on UDS) so the agent doesn't see abrupt tool failures.
 
 Claim codes surface on stdout/stderr of your Node process, not the gateway's. Plan how you expose them to humans - a web UI endpoint, a file you rotate, whatever fits.
 

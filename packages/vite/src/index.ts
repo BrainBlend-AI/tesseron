@@ -8,7 +8,7 @@ import type { Plugin, ViteDevServer } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 
 export interface TesseronViteOptions {
-  /** Human-readable app name written to the tab discovery file. Defaults to the Vite project directory name. */
+  /** Human-readable app name written to the instance manifest. Defaults to the Vite project directory name. */
   appName?: string;
 }
 
@@ -18,8 +18,8 @@ export interface TesseronViteOptions {
  * a binary frame. */
 type BridgePayload = string | RawData;
 
-interface PendingTab {
-  tabId: string;
+interface PendingInstance {
+  instanceId: string;
   appName?: string;
   wsUrl: string;
   browserWs: WebSocket;
@@ -29,7 +29,7 @@ interface PendingTab {
 }
 
 const WS_PATH_PREFIX = '/@tesseron/ws';
-const TABS_DIR = join(homedir(), '.tesseron', 'tabs');
+const INSTANCES_DIR = join(homedir(), '.tesseron', 'instances');
 const GATEWAY_SUBPROTOCOL = 'tesseron-gateway';
 
 /** Decode a `ws` text-frame payload back to a string. `ws` always emits a
@@ -41,22 +41,22 @@ function rawDataToString(data: RawData): string {
   return Buffer.from(data as ArrayBuffer).toString('utf8');
 }
 
-async function ensureTabsDir(): Promise<void> {
-  await mkdir(TABS_DIR, { recursive: true });
+async function ensureInstancesDir(): Promise<void> {
+  await mkdir(INSTANCES_DIR, { recursive: true });
 }
 
-async function writeTabFile(tab: PendingTab): Promise<void> {
-  await ensureTabsDir();
-  const file = join(TABS_DIR, `${tab.tabId}.json`);
+async function writeManifest(inst: PendingInstance): Promise<void> {
+  await ensureInstancesDir();
+  const file = join(INSTANCES_DIR, `${inst.instanceId}.json`);
   await writeFile(
     file,
     JSON.stringify(
       {
-        version: 1,
-        tabId: tab.tabId,
-        appName: tab.appName,
-        wsUrl: tab.wsUrl,
+        version: 2,
+        instanceId: inst.instanceId,
+        appName: inst.appName,
         addedAt: Date.now(),
+        transport: { kind: 'ws', url: inst.wsUrl },
       },
       null,
       2,
@@ -64,20 +64,21 @@ async function writeTabFile(tab: PendingTab): Promise<void> {
   );
 }
 
-async function deleteTabFile(tabId: string): Promise<void> {
-  const file = join(TABS_DIR, `${tabId}.json`);
+async function deleteManifest(instanceId: string): Promise<void> {
+  const file = join(INSTANCES_DIR, `${instanceId}.json`);
   if (existsSync(file)) {
     await unlink(file).catch(() => {});
   }
 }
 
 /**
- * Tesseron Vite plugin. Exposes `/@tesseron/ws` on the Vite dev server so browser
- * apps can connect without a separate gateway port. Writes per-tab discovery files
- * to `~/.tesseron/tabs/` so the gateway can find and connect to each tab.
+ * Tesseron Vite plugin. Exposes `/@tesseron/ws` on the Vite dev server so
+ * browser apps can connect without a separate gateway port. Writes per-tab
+ * instance manifests to `~/.tesseron/instances/` so the gateway can find and
+ * connect to each open tab.
  */
 export function tesseron(options: TesseronViteOptions = {}): Plugin {
-  const tabs = new Map<string, PendingTab>();
+  const instances = new Map<string, PendingInstance>();
   let serverUrl = '';
 
   return {
@@ -107,17 +108,25 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
           if (protocols.includes(GATEWAY_SUBPROTOCOL)) return;
 
           wss.handleUpgrade(req, socket, head, (ws) => {
-            const tabId = `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-            const wsUrl = `${serverUrl.replace(/^http/, 'ws')}${WS_PATH_PREFIX}/${tabId}`;
+            const instanceId = `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            const wsUrl = `${serverUrl.replace(/^http/, 'ws')}${WS_PATH_PREFIX}/${instanceId}`;
             const appName =
               options.appName ??
               (server.config.root ? server.config.root.split('/').pop() : undefined) ??
               'unknown';
-            const entry: PendingTab = { tabId, appName, wsUrl, browserWs: ws, queue: [] };
-            tabs.set(tabId, entry);
+            const entry: PendingInstance = {
+              instanceId,
+              appName,
+              wsUrl,
+              browserWs: ws,
+              queue: [],
+            };
+            instances.set(instanceId, entry);
 
-            writeTabFile(entry).catch((err: Error) =>
-              process.stderr.write(`[tesseron] failed to write tab file: ${err.message}\n`),
+            writeManifest(entry).catch((err: Error) =>
+              process.stderr.write(
+                `[tesseron] failed to write instance manifest: ${err.message}\n`,
+              ),
             );
 
             ws.on('message', (data: RawData, isBinary: boolean) => {
@@ -135,24 +144,24 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
             });
 
             ws.on('close', () => {
-              tabs.delete(tabId);
+              instances.delete(instanceId);
               entry.gatewayWs?.close(1000, 'Browser disconnected');
-              deleteTabFile(tabId).catch(() => {});
+              deleteManifest(instanceId).catch(() => {});
             });
 
             ws.on('error', () => {
-              tabs.delete(tabId);
+              instances.delete(instanceId);
               entry.gatewayWs?.close(1000, 'Browser error');
-              deleteTabFile(tabId).catch(() => {});
+              deleteManifest(instanceId).catch(() => {});
             });
           });
           return;
         }
 
-        // Gateway connecting to /@tesseron/ws/:tabId
+        // Gateway connecting to /@tesseron/ws/:instanceId
         if (url.startsWith(`${WS_PATH_PREFIX}/`)) {
-          const tabId = url.slice(WS_PATH_PREFIX.length + 1).split('?')[0]!;
-          const entry = tabs.get(tabId);
+          const instanceId = url.slice(WS_PATH_PREFIX.length + 1).split('?')[0]!;
+          const entry = instances.get(instanceId);
           if (!entry) {
             socket.destroy();
             return;
@@ -189,10 +198,10 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
       });
 
       server.httpServer?.on('close', () => {
-        for (const tab of tabs.values()) {
-          deleteTabFile(tab.tabId).catch(() => {});
+        for (const inst of instances.values()) {
+          deleteManifest(inst.instanceId).catch(() => {});
         }
-        tabs.clear();
+        instances.clear();
       });
     },
   };

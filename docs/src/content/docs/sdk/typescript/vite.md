@@ -16,11 +16,11 @@ Browsers can't bind TCP ports. The gateway needs a WebSocket endpoint to dial. T
 When a browser tab opens your dev URL, it dials `/@tesseron/ws` on the same origin. The plugin:
 
 1. Accepts the browser connection (no subprotocol).
-2. Writes `~/.tesseron/tabs/<tabId>.json` with a per-tab URL pointing at `/@tesseron/ws/<tabId>` on your dev server.
+2. Writes `~/.tesseron/instances/<instanceId>.json` (a v2 manifest with `transport: { kind: 'ws', url }`) pointing at `/@tesseron/ws/<instanceId>` on your dev server.
 3. Waits for the gateway to dial the per-tab URL with the `tesseron-gateway` subprotocol.
-4. Bridges frames between the two sockets, buffering browser → gateway traffic if the browser starts talking before the gateway dials in.
+4. Bridges frames between the two sockets, buffering browser → gateway traffic if the browser starts talking before the gateway dials in. Text frames stay text, binary frames stay binary — the bridge preserves the frame type so the browser SDK isn't fed binary blobs that it would silently drop.
 
-One tab → one tab file → one gateway connection → one Tesseron session. Multiple tabs coexist cleanly.
+One tab → one instance manifest → one gateway connection → one Tesseron session. Multiple tabs coexist cleanly.
 
 ## Install
 
@@ -60,7 +60,7 @@ export default defineConfig({
 
 ```ts
 tesseron({
-  appName: 'my-app',   // Optional. Written into the tab discovery file so the
+  appName: 'my-app',   // Optional. Written into the instance manifest so the
                        // gateway log names your app usefully. Defaults to the
                        // Vite project directory name.
 });
@@ -83,7 +83,7 @@ If your Vite server runs on a non-default port (e.g. `5175`), `location.origin` 
 
 ## Multiple tabs
 
-Each browser tab gets its own `tabId`, its own tab file, and its own gateway connection. Session claiming is per-tab - open three tabs of the same app and you get three claim codes, each independent.
+Each browser tab gets its own `instanceId`, its own manifest, and its own gateway connection. Session claiming is per-tab - open three tabs of the same app and you get three claim codes, each independent.
 
 ## Production builds
 
@@ -107,8 +107,8 @@ The Vite plugin is strictly for dev-time workflows.
 
 If you use a dev server other than Vite (webpack-dev-server, Rsbuild, Next.js dev, a custom Express-based HMR setup), the same three steps work:
 
-1. On WebSocket upgrade at `/@tesseron/ws` - accept the browser and assign a `tabId`.
-2. Write `~/.tesseron/tabs/<tabId>.json` with `{ version: 1, tabId, appName, wsUrl, addedAt }`, where `wsUrl` points at a tab-specific path like `/@tesseron/ws/<tabId>`.
-3. On WebSocket upgrade at that per-tab path with subprotocol `tesseron-gateway` - accept the gateway and relay frames between the two sockets. Buffer browser traffic until the gateway arrives.
+1. On WebSocket upgrade at `/@tesseron/ws` - accept the browser and assign an `instanceId`.
+2. Write `~/.tesseron/instances/<instanceId>.json` with `{ version: 2, instanceId, appName, addedAt, transport: { kind: 'ws', url } }`, where `url` points at a tab-specific path like `/@tesseron/ws/<instanceId>`.
+3. On WebSocket upgrade at that per-tab path with subprotocol `tesseron-gateway` - accept the gateway and relay frames between the two sockets. Preserve text/binary frame types when relaying; buffer browser traffic until the gateway arrives.
 
-`@tesseron/vite`'s ~150-line source is the reference; adapt it to whatever dev server you run.
+`@tesseron/vite`'s source is the reference; adapt it to whatever dev server you run.
