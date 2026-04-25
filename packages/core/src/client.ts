@@ -225,6 +225,14 @@ export class TesseronClient implements BuilderRegistry {
     if (!this.appConfig) {
       throw new Error('Tesseron: call app({ id, name }) before connect().');
     }
+    // If a previous transport is still attached (e.g. HMR re-ran the module
+    // and re-invoked `connect()` on the same singleton), close it now. The
+    // alternative — silently orphaning the old socket — leaves a phantom
+    // "claimed" session on the gateway side, and the bridge's by-app-id
+    // lookup picks that dead session before the freshly-claimed one.
+    if (this.transport && this.transport !== transport) {
+      this.transport.close();
+    }
     this.transport = transport;
     const dispatcher = new JsonRpcDispatcher((message) => transport.send(message));
     this.dispatcher = dispatcher;
@@ -232,6 +240,10 @@ export class TesseronClient implements BuilderRegistry {
     transport.onMessage((message) => dispatcher.receive(message));
     transport.onClose((reason) => {
       dispatcher.rejectAllPending(new TransportClosedError(reason));
+      // Only clear instance state if it still belongs to *this* transport.
+      // A stale onClose from a previously-attached transport firing after
+      // a reconnect would otherwise trample the new dispatcher and welcome.
+      if (this.dispatcher !== dispatcher) return;
       this.dispatcher = undefined;
       this.welcome = undefined;
       for (const ctrl of this.invocations.values()) ctrl.abort();

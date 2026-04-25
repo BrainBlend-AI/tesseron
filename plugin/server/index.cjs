@@ -25774,7 +25774,7 @@ var McpAgentBridge = class {
         localName = name.slice(separatorIdx + PREFIX_SEPARATOR.length);
         invokeArgs = args;
       }
-      const session = this.gateway.getClaimedSessions().find((s) => s.app.id === appId);
+      const session = this.latestClaimedByApp(appId);
       if (!session) {
         return errorResult(`No claimed session found for app "${appId}".`);
       }
@@ -25881,6 +25881,26 @@ var McpAgentBridge = class {
       return {};
     });
   }
+  /**
+   * Picks the most-recently-claimed session matching `appId`. The gateway can
+   * legitimately hold more than one claimed session per `app.id`: a second
+   * browser tab opening the app, an HMR-driven reconnect that briefly overlaps
+   * with the prior socket, or a long-tailed close event that hasn't fired yet.
+   * `Map` iteration order is insertion order, so a naive `find` returns the
+   * oldest match — which can be a phantom whose transport is dead, in which
+   * case the action invocation or resource read hangs indefinitely. Picking
+   * the latest `claimedAt` matches what the user actually intends to drive.
+   */
+  latestClaimedByApp(appId) {
+    let latest;
+    for (const session of this.gateway.getClaimedSessions()) {
+      if (session.app.id !== appId) continue;
+      if (!latest || (session.claimedAt ?? 0) > (latest.claimedAt ?? 0)) {
+        latest = session;
+      }
+    }
+    return latest;
+  }
   locateResource(uri) {
     let parsed;
     try {
@@ -25892,7 +25912,7 @@ var McpAgentBridge = class {
     const appId = parsed.hostname;
     const resourceName = parsed.pathname.replace(/^\//, "");
     if (!appId || !resourceName) return null;
-    const session = this.gateway.getClaimedSessions().find((s) => s.app.id === appId);
+    const session = this.latestClaimedByApp(appId);
     if (!session) return null;
     return { session, resourceName };
   }
@@ -25947,7 +25967,7 @@ var McpAgentBridge = class {
         'tesseron__read_resource requires string "app_id" and "name". Use tesseron__list_actions to enumerate available resources.'
       );
     }
-    const session = this.gateway.getClaimedSessions().find((s) => s.app.id === appId);
+    const session = this.latestClaimedByApp(appId);
     if (!session) {
       return errorResult(`No claimed session found for app "${appId}".`);
     }
