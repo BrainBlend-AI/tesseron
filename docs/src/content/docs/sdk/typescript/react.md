@@ -51,19 +51,63 @@ interface TesseronConnectionState {
   welcome?: WelcomeResult;
   claimCode?: string;
   error?: Error;
+  resumeStatus?: 'none' | 'resumed' | 'failed';
 }
 ```
+
+`resumeStatus` is set when `status === 'open'`:
+
+- `'none'` - no resume was attempted (no stored creds, or `resume` disabled).
+- `'resumed'` - `tesseron/resume` succeeded; the prior session was reattached.
+- `'failed'` - resume was attempted but the gateway rejected it; the hook fell back to a fresh `tesseron/hello` and persisted the new credentials. Useful for telemetry, and for UIs that want to show "your previous session expired" instead of silently switching to a new claim code.
 
 Options:
 
 ```ts
 interface UseTesseronConnectionOptions {
-  url?: string;     // defaults to `<location.origin>/@tesseron/ws` (served by @tesseron/vite)
+  url?: string;      // defaults to `<location.origin>/@tesseron/ws` (served by @tesseron/vite)
   enabled?: boolean; // gate the connect, e.g. only when logged in
+  resume?: boolean | string | ResumeStorage;
 }
 ```
 
 Only one component should call `useTesseronConnection` per client - it owns the WebSocket. Most apps put it at the root.
+
+### Surviving page refresh / HMR with `resume`
+
+By default, every page load of an app that uses `useTesseronConnection` starts a brand-new session, which means a brand-new claim code on every refresh. For most local-dev React apps that's exactly the wrong default - flip `resume: true` and the hook persists the `sessionId` / `resumeToken` from each handshake in `localStorage`, then sends `tesseron/resume` instead of `tesseron/hello` on the next page load. The agent stays paired across refreshes, HMR reloads, and brief network blips:
+
+```tsx
+const conn = useTesseronConnection({ resume: true });
+```
+
+The hook handles the backing protocol details for you - token rotation, the [`ResumeFailed`](/protocol/resume/) fallback to a fresh hello when the gateway zombie has expired, and clearing stale credentials. Inspect `conn.resumeStatus` to tell whether the current session was resumed (`'resumed'`), is a fallback after a rejected resume (`'failed'`), or was a plain hello (`'none'`). See [Session resume](/protocol/resume/) for the underlying primitives.
+
+The `resume` option accepts three forms:
+
+| Form | Behaviour |
+|---|---|
+| `true` | Persist in `localStorage` under `'tesseron:resume'`. |
+| `string` | Persist in `localStorage` under that exact key. Use a per-app value if you mount multiple `WebTesseronClient` instances on one page. |
+| `ResumeStorage` | Custom `{ load, save, clear }` callbacks (sync or async). Use this when `localStorage` is not available - Electron with strict CSP, an iframe partition, the OS keychain, etc. |
+
+```ts
+interface ResumeStorage {
+  load: () =>
+    | ResumeCredentials
+    | null
+    | undefined
+    | Promise<ResumeCredentials | null | undefined>;
+  save: (credentials: ResumeCredentials) => void | Promise<void>;
+  clear: () => void | Promise<void>;
+}
+```
+
+Resume tokens are one-shot - the gateway rotates the token on every successful handshake (hello or resume), so the hook always overwrites the stored value with the freshest token. After a successful resume `welcome.claimCode` is `undefined`, since the session is already claimed.
+
+Resume re-establishes the session, **not** its `resources/subscribe` bindings. `useTesseronResource` re-registers subscriptions naturally on remount, so apps using the provided hooks see no behavioural difference; if you wire subscriptions by hand against the lower-level client, re-subscribe after each connect.
+
+Storage failures (private mode, quota exceeded, a throwing custom backend) are non-fatal: the hook treats them as a no-op for save/clear, and as "no saved session" for load. The connection itself is never failed by storage problems.
 
 ## `useTesseronAction`
 
