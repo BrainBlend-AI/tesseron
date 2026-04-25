@@ -115,11 +115,14 @@ export function useTesseronResource<T = unknown>(
 
 /**
  * Persistence backend for resume credentials. Implementations may be sync or
- * async; the hook awaits each call. Returning `null` from `load` means "no
- * stored session, do a fresh hello."
+ * async; the hook awaits each call. Returning `null` or `undefined` from
+ * `load` means "no stored session, do a fresh hello." Throws from any method
+ * are non-fatal: the hook treats them like an empty backend (load) or a
+ * silent no-op (save/clear) so storage problems can't fail-close the
+ * connection.
  */
 export interface ResumeStorage {
-  load: () => ResumeCredentials | null | Promise<ResumeCredentials | null>;
+  load: () => ResumeCredentials | null | undefined | Promise<ResumeCredentials | null | undefined>;
   save: (credentials: ResumeCredentials) => void | Promise<void>;
   clear: () => void | Promise<void>;
 }
@@ -145,13 +148,33 @@ export interface UseTesseronConnectionOptions {
    *   iframe partition, custom storage).
    *
    * On a `TesseronError(ResumeFailed)` (TTL expired, token rotated by another
-   * tab, gateway restarted), the hook clears the stored credentials and falls
-   * back to a fresh `tesseron/hello`. Resume tokens are one-shot - the hook
-   * always overwrites the stored value with the freshest token from each
-   * successful handshake.
+   * tab, gateway restarted, session was never claimed), the hook clears the
+   * stored credentials, falls back to a fresh `tesseron/hello`, and surfaces
+   * `resumeStatus: 'failed'` in {@link TesseronConnectionState} so the UI can
+   * react. Resume tokens rotate on every successful handshake (hello or
+   * resume), and the hook always overwrites the stored value with the
+   * freshest token.
+   *
+   * Note: resume only re-establishes the session, not its
+   * `resources/subscribe` bindings. The {@link useTesseronResource} hook
+   * re-registers subscriptions naturally on remount, so apps using the
+   * provided hooks see no behavioral difference; if you wire subscriptions
+   * by hand against the lower-level client, you must re-subscribe after
+   * each connect.
    */
   resume?: boolean | string | ResumeStorage;
 }
+
+/**
+ * Outcome of the resume attempt that produced the current connection.
+ * - `'none'` - no resume was attempted (no stored creds or `resume` disabled).
+ * - `'resumed'` - `tesseron/resume` succeeded; the session was reattached.
+ * - `'failed'` - resume was attempted but the gateway rejected it; the hook
+ *   transparently fell back to a fresh `tesseron/hello`. Useful for telemetry
+ *   and for UIs that want to say "your previous session expired" rather than
+ *   silently displaying a new claim code.
+ */
+export type TesseronResumeStatus = 'none' | 'resumed' | 'failed';
 
 /** Reactive connection state returned from {@link useTesseronConnection}. */
 export interface TesseronConnectionState {
@@ -163,6 +186,12 @@ export interface TesseronConnectionState {
    */
   claimCode?: string;
   error?: Error;
+  /**
+   * Set when `status === 'open'`. Indicates whether the current session is a
+   * resumed one, a fresh fallback after a failed resume, or a plain hello.
+   * See {@link TesseronResumeStatus}.
+   */
+  resumeStatus?: TesseronResumeStatus;
 }
 
 const DEFAULT_RESUME_STORAGE_KEY = 'tesseron:resume';
@@ -244,52 +273,72 @@ export function useTesseronConnection(
 
     const storage = resolveResumeStorage(resumeRef.current);
 
-    void (async () => {
-      try {
-        let saved: ResumeCredentials | null = null;
-        if (storage) {
-          try {
-            saved = await storage.load();
-          } catch {
-            // A throwing custom backend shouldn't break the connection; fall
-            // through to a fresh hello.
-            saved = null;
-          }
-        }
-
-        let welcome: WelcomeResult;
+    const run = async (): Promise<void> => {
+      let saved: ResumeCredentials | null = null;
+      if (storage) {
         try {
-          welcome = await client.connect(url, saved ? { resume: saved } : undefined);
-        } catch (err) {
-          if (
-            saved &&
-            err instanceof TesseronError &&
-            err.code === TesseronErrorCode.ResumeFailed
-          ) {
-            // Stored creds are stale (TTL elapsed, gateway restarted, token
-            // already rotated by another tab). Clear and start fresh.
-            await storage?.clear();
-            if (cancelled) return;
-            welcome = await client.connect(url);
-          } else {
-            throw err;
-          }
+          saved = (await storage.load()) ?? null;
+        } catch {
+          // A throwing custom backend shouldn't break the connection; treat
+          // as no saved creds and proceed to a fresh hello.
+          saved = null;
         }
+      }
 
-        if (cancelled) return;
-        if (storage && welcome.resumeToken) {
+      let welcome: WelcomeResult;
+      let resumeStatus: TesseronResumeStatus = 'none';
+      try {
+        welcome = await client.connect(url, saved ? { resume: saved } : undefined);
+        if (saved) resumeStatus = 'resumed';
+      } catch (err) {
+        if (saved && err instanceof TesseronError && err.code === TesseronErrorCode.ResumeFailed) {
+          // Stored creds are stale (TTL elapsed, gateway restarted, session
+          // never claimed, token already rotated by another tab). Best-effort
+          // clear and start fresh; clear failures must not block the fallback.
+          if (storage) {
+            try {
+              await storage.clear();
+            } catch {
+              // Cleanup is non-fatal - the next successful save() overwrites
+              // the stale entry anyway.
+            }
+          }
+          if (cancelled) return;
+          welcome = await client.connect(url);
+          resumeStatus = 'failed';
+        } else {
+          throw err;
+        }
+      }
+
+      if (cancelled) return;
+      if (storage && welcome.resumeToken) {
+        try {
           await storage.save({
             sessionId: welcome.sessionId,
             resumeToken: welcome.resumeToken,
           });
+        } catch {
+          // Persistence failure is non-fatal - the live session still works
+          // for this page load; it just won't survive the next refresh.
         }
-        if (cancelled) return;
-        setState({ status: 'open', welcome, claimCode: welcome.claimCode });
-      } catch (error) {
-        if (cancelled) return;
-        setState({ status: 'error', error: error as Error });
       }
-    })();
+      if (cancelled) return;
+      setState({
+        status: 'open',
+        welcome,
+        claimCode: welcome.claimCode,
+        resumeStatus,
+      });
+    };
+
+    run().catch((error: unknown) => {
+      if (cancelled) return;
+      setState({
+        status: 'error',
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    });
 
     return () => {
       cancelled = true;

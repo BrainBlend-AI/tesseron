@@ -107,6 +107,7 @@ describe('useTesseronConnection - default behaviour (no resume)', () => {
     expect(state.status).toBe('open');
     expect(state.welcome).toEqual(welcome);
     expect(state.claimCode).toBe('AAA-BBB');
+    expect(state.resumeStatus).toBe('none');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({ url: 'ws://x/y', options: undefined });
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
@@ -171,6 +172,7 @@ describe('useTesseronConnection - resume: true (localStorage default)', () => {
     const state = await renderUntilOpenOrError({ resume: true }, client);
 
     expect(state.status).toBe('open');
+    expect(state.resumeStatus).toBe('resumed');
     expect(calls).toHaveLength(1);
     expect(calls[0]?.options).toEqual({
       resume: { sessionId: 's1', resumeToken: 'tok-old' },
@@ -197,6 +199,7 @@ describe('useTesseronConnection - resume: true (localStorage default)', () => {
     const state = await renderUntilOpenOrError({ resume: true }, client);
 
     expect(state.status).toBe('open');
+    expect(state.resumeStatus).toBe('failed');
     expect(state.welcome?.sessionId).toBe('s-new');
     expect(calls).toHaveLength(2);
     expect(calls[0]?.options?.resume).toEqual({
@@ -322,5 +325,59 @@ describe('useTesseronConnection - resume: ResumeStorage (custom backend)', () =>
     expect(state.status).toBe('open');
     expect(calls[0]?.options).toBeUndefined();
     expect(backend.save).toHaveBeenCalled();
+  });
+
+  it('treats a load() returning undefined as no saved creds', async () => {
+    const backend: ResumeStorage = {
+      load: vi.fn(() => undefined),
+      save: vi.fn(),
+      clear: vi.fn(),
+    };
+    const fresh = makeWelcome({ resumeToken: 'tok-A' });
+    const { client, calls } = makeFakeClient([fresh]);
+
+    const state = await renderUntilOpenOrError({ resume: backend }, client);
+
+    expect(state.status).toBe('open');
+    expect(calls[0]?.options).toBeUndefined();
+  });
+
+  it('does not fail the connection when save() throws', async () => {
+    const backend: ResumeStorage = {
+      load: vi.fn(() => null),
+      save: vi.fn(() => {
+        throw new Error('quota exceeded');
+      }),
+      clear: vi.fn(),
+    };
+    const fresh = makeWelcome({ resumeToken: 'tok-A' });
+    const { client } = makeFakeClient([fresh]);
+
+    const state = await renderUntilOpenOrError({ resume: backend }, client);
+
+    expect(state.status).toBe('open');
+    expect(state.welcome).toEqual(fresh);
+    expect(backend.save).toHaveBeenCalled();
+  });
+
+  it('still falls back to a fresh hello when clear() throws during ResumeFailed recovery', async () => {
+    const backend: ResumeStorage = {
+      load: vi.fn(() => ({ sessionId: 's-stale', resumeToken: 'tok-stale' })),
+      save: vi.fn(),
+      clear: vi.fn(() => {
+        throw new Error('cannot clear');
+      }),
+    };
+    const resumeFailed = new TesseronError(TesseronErrorCode.ResumeFailed, 'token mismatch');
+    const fresh = makeWelcome({ sessionId: 's-new', resumeToken: 'tok-new' });
+    const { client, calls } = makeFakeClient([resumeFailed, fresh]);
+
+    const state = await renderUntilOpenOrError({ resume: backend }, client);
+
+    expect(state.status).toBe('open');
+    expect(state.resumeStatus).toBe('failed');
+    expect(state.welcome?.sessionId).toBe('s-new');
+    expect(calls).toHaveLength(2);
+    expect(backend.clear).toHaveBeenCalled();
   });
 });
