@@ -121,6 +121,8 @@ localStorage.setItem('tesseron:shop', JSON.stringify({
 
 Four lines. The SDK does not do this for you; `localStorage` is one answer among many. A desktop app might stash the pair in the OS keychain. A server process might put it in a file next to its config. An iframe-embedded app might have CSP reasons not to persist at all.
 
+If you're using [`@tesseron/react`](/sdk/typescript/react/), the `useTesseronConnection` hook bakes in this recipe behind a `resume` option - pass `resume: true` to persist via `localStorage` automatically, or hand it a `ResumeStorage` object for custom backends.
+
 ### Falling back when resume fails
 
 ```ts

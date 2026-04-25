@@ -25,7 +25,10 @@ export function App(): JSX.Element {
   const [input, setInput] = useState('');
   const [lastLog, setLastLog] = useState<string>('');
 
-  const connection = useTesseronConnection();
+  // `resume: true` persists `{ sessionId, resumeToken }` in localStorage so a
+  // page refresh / HMR reload reattaches to the same claimed session via
+  // `tesseron/resume` instead of issuing a fresh claim code each time.
+  const connection = useTesseronConnection({ resume: true });
 
   // Refs to read latest state from handlers that close over stale values.
   const todosRef = useRef(todos);

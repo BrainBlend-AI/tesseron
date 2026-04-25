@@ -58,12 +58,41 @@ Options:
 
 ```ts
 interface UseTesseronConnectionOptions {
-  url?: string;     // defaults to `<location.origin>/@tesseron/ws` (served by @tesseron/vite)
+  url?: string;      // defaults to `<location.origin>/@tesseron/ws` (served by @tesseron/vite)
   enabled?: boolean; // gate the connect, e.g. only when logged in
+  resume?: boolean | string | ResumeStorage;
 }
 ```
 
 Only one component should call `useTesseronConnection` per client - it owns the WebSocket. Most apps put it at the root.
+
+### Surviving page refresh / HMR with `resume`
+
+By default, every mount of `useTesseronConnection` starts a brand-new session, which means a brand-new claim code on every page refresh. For most local-dev React apps that's exactly the wrong default - flip `resume: true` and the hook persists the `sessionId` / `resumeToken` from each handshake in `localStorage`, then sends `tesseron/resume` instead of `tesseron/hello` on the next mount. The agent stays paired across refreshes, HMR reloads, and brief network blips:
+
+```tsx
+const conn = useTesseronConnection({ resume: true });
+```
+
+The hook handles the backing protocol details for you - token rotation, the [`ResumeFailed`](/protocol/resume/) fallback to a fresh hello when the gateway zombie has expired, and clearing stale credentials. See [Session resume](/protocol/resume/) for the underlying primitives.
+
+The `resume` option accepts three forms:
+
+| Form | Behaviour |
+|---|---|
+| `true` | Persist in `localStorage` under `'tesseron:resume'`. |
+| `string` | Persist in `localStorage` under that exact key. Use a per-app value if you mount multiple `WebTesseronClient` instances on one page. |
+| `ResumeStorage` | Custom `{ load, save, clear }` callbacks (sync or async). Use this when `localStorage` is not available - Electron with strict CSP, an iframe partition, the OS keychain, etc. |
+
+```ts
+interface ResumeStorage {
+  load: () => ResumeCredentials | null | Promise<ResumeCredentials | null>;
+  save: (credentials: ResumeCredentials) => void | Promise<void>;
+  clear: () => void | Promise<void>;
+}
+```
+
+Resume tokens are one-shot - the gateway rotates the token on every successful resume, so the hook always overwrites the stored value with the freshest token from each handshake. After a successful resume `welcome.claimCode` is `undefined`, since the session is already claimed.
 
 ## `useTesseronAction`
 
