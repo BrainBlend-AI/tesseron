@@ -3,7 +3,7 @@
  * Major-version mismatches are hard-rejected by the gateway; minor-version
  * mismatches log a warning.
  */
-export const PROTOCOL_VERSION = '1.0.0' as const;
+export const PROTOCOL_VERSION = '1.1.0' as const;
 /** JSON-RPC version used for every message. */
 export const JSONRPC_VERSION = '2.0' as const;
 

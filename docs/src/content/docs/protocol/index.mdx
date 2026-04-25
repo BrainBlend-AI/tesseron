@@ -17,9 +17,11 @@ import Sequence from '../../../components/Sequence.astro';
 The Tesseron protocol specification (every page under `docs/protocol/`) is licensed **CC BY 4.0** — independent from the reference implementation. You are free to build a compatible implementation in any language for any purpose, including commercially, with attribution. See [`LICENSE`](https://github.com/BrainBlend-AI/tesseron/blob/main/docs/src/content/docs/protocol/LICENSE) in the protocol directory.
 </Aside>
 
-Tesseron speaks **JSON-RPC 2.0 over WebSocket** between your app and the MCP gateway, then the gateway bridges that to **MCP over stdio** for the agent. One action round-trip crosses both protocols.
+Tesseron speaks **JSON-RPC 2.0 over a reliable, ordered, duplex channel** between your app and the MCP gateway, then the gateway bridges that to **MCP over stdio** for the agent. One action round-trip crosses both protocols.
 
-The protocol is at **version `1.0.0`**.
+The channel is a **transport binding** - WebSocket by default, Unix domain socket as an opt-in for Node apps that don't need the browser bridge. The protocol is binding-neutral; see [Transport](/protocol/transport/) for the contract every binding satisfies.
+
+The protocol is at **version `1.1.0`**.
 
 <Sequence
   caption="A first-use session, start to finish: from WebSocket open to the first tool-call result returned to the agent."
@@ -50,8 +52,8 @@ The protocol is at **version `1.0.0`**.
 <CardGrid>
   <LinkCard title="Wire format (JSON-RPC)" href="./wire-format/"
     description="Envelope shapes, methods, notifications, ID correlation." />
-  <LinkCard title="Transport (WebSocket)" href="./transport/"
-    description="URL, framing, origin allowlist, reconnection rules." />
+  <LinkCard title="Transport" href="./transport/"
+    description="The binding-neutral channel contract, plus per-binding pages for WebSocket and Unix domain sockets." />
   <LinkCard title="Handshake & claiming" href="./handshake/"
     description="`tesseron/hello` → `welcome` → claim code → bound session." />
   <LinkCard title="Action model" href="./actions/"
@@ -76,9 +78,12 @@ The protocol is at **version `1.0.0`**.
 
 | Name | Value |
 |---|---|
-| Protocol version | `1.0.0` |
-| Discovery directory | `~/.tesseron/tabs/` |
+| Protocol version | `1.1.0` |
+| Discovery directory (v2) | `~/.tesseron/instances/` |
+| Discovery directory (v1, compat) | `~/.tesseron/tabs/` |
+| Manifest version | `2` |
 | WebSocket subprotocol (gateway side) | `tesseron-gateway` |
+| UDS framing | NDJSON (one JSON-RPC message per `\n`) |
 | Default action timeout | `60_000` ms |
 | Max sampling depth | `3` |
 | Tool name pattern | `<app_id>__<action_name>` |

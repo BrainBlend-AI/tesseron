@@ -23,7 +23,7 @@ Protocol types and action builder for [Tesseron](https://github.com/BrainBlend-A
 
 ## What's inside
 
-- **Protocol types** — JSON-RPC 2.0 wire shapes (`HelloParams`, `WelcomeResult`, `ActionInvokeParams`, etc.), method and notification names, `TesseronCapabilities`, and the versioned `PROTOCOL_VERSION` constant (currently `1.0.0`).
+- **Protocol types** — JSON-RPC 2.0 wire shapes (`HelloParams`, `WelcomeResult`, `ActionInvokeParams`, etc.), method and notification names, `TesseronCapabilities`, the discriminated `TransportSpec` + `InstanceManifest` types for the multi-binding discovery format, and the versioned `PROTOCOL_VERSION` constant (currently `1.1.0`).
 - **Action builder** — the fluent, typed `.action(name).input(schema).handler(fn)` API that the framework packages wrap.
 - **Resource builder** — subscribable or read-only resources with the same fluent ergonomics.
 - **Handler context** — `ActionContext` with `ctx.confirm`, `ctx.elicit`, `ctx.sample`, `ctx.progress`, `ctx.log`, cancellation via `ctx.signal`, and the negotiated `ctx.agentCapabilities`.

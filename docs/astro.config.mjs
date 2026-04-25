@@ -120,7 +120,15 @@ export default defineConfig({
           items: [
             { label: 'Protocol overview', link: '/protocol/' },
             { label: 'Wire format (JSON-RPC)', link: '/protocol/wire-format/' },
-            { label: 'Transport (WebSocket)', link: '/protocol/transport/' },
+            { label: 'Transport', link: '/protocol/transport/' },
+            {
+              label: 'Transport bindings',
+              collapsed: true,
+              items: [
+                { label: 'WebSocket', link: '/protocol/transport-bindings/ws/' },
+                { label: 'Unix domain socket', link: '/protocol/transport-bindings/uds/' },
+              ],
+            },
             { label: 'Handshake & claiming', link: '/protocol/handshake/' },
             { label: 'Session resume', link: '/protocol/resume/' },
             { label: 'Action model', link: '/protocol/actions/' },

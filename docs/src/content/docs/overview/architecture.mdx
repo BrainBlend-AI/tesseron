@@ -35,18 +35,18 @@ import Diagram from '../../../components/Diagram.astro';
 
 ## Three processes
 
-- **Your app** - browser tab, React / Svelte / Vue / vanilla-TS, or a Node / desktop process. Hosts the action handlers and the real state they mutate. Also hosts a WebSocket endpoint the gateway dials into:
-  - Browser apps get that endpoint for free by adding the `@tesseron/vite` plugin (or the equivalent for your dev server).
-  - Node apps get it via `@tesseron/server`, which binds a loopback port automatically.
-  - Anything else (Electron main, .NET, Python, Go, Rust, ...) can follow the same pattern: bind a WS server, drop a discovery file at `~/.tesseron/tabs/<tabId>.json`, speak the protocol.
-- **The MCP gateway** - a small Node process (`@tesseron/mcp`) bundled into the Claude Code plugin. Runs on stdio for the agent. Watches `~/.tesseron/tabs/` and dials each app it finds. The gateway never binds a port of its own.
-- **The agent** - Claude Code, Claude Desktop, Cursor, or any other MCP client. Doesn't know or care about WebSockets - it only sees standard MCP tools.
+- **Your app** - browser tab, React / Svelte / Vue / vanilla-TS, or a Node / desktop process. Hosts the action handlers and the real state they mutate. Also hosts a local endpoint the gateway dials into:
+  - Browser apps get that endpoint for free by adding the `@tesseron/vite` plugin (or the equivalent for your dev server). The binding is WebSocket.
+  - Node apps get it via `@tesseron/server`, which by default binds a loopback WebSocket; pass `{ transport: 'uds' }` for a Unix domain socket on Linux/macOS.
+  - Anything else (Electron main, .NET, Python, Go, Rust, ...) can follow the same pattern: bind whichever [transport binding](/protocol/transport/) makes sense, drop an instance manifest at `~/.tesseron/instances/<instanceId>.json`, speak the protocol.
+- **The MCP gateway** - a small Node process (`@tesseron/mcp`) bundled into the Claude Code plugin. Runs on stdio for the agent. Watches `~/.tesseron/instances/` and dials each app it finds via the binding the manifest advertises. The gateway never binds a port of its own.
+- **The agent** - Claude Code, Claude Desktop, Cursor, or any other MCP client. Doesn't know or care about transport bindings - it only sees standard MCP tools.
 
 ## Two protocols
 
 | Hop | Protocol | Transport |
 |---|---|---|
-| app ↔ gateway | Tesseron JSON-RPC 2.0 (custom) | WebSocket |
+| app ↔ gateway | Tesseron JSON-RPC 2.0 (custom) | WebSocket or UDS (per binding) |
 | gateway ↔ agent | Model Context Protocol | stdio |
 
 The gateway is the only place that knows both dialects. Everything else is clean on each side: your app speaks one flavour of JSON-RPC, the agent speaks MCP.
@@ -75,16 +75,16 @@ The gateway is the only place that knows both dialects. Everything else is clean
 Because MCP doesn't run over WebSocket, and JSON-RPC-over-stdio doesn't work from a browser tab. The gateway reconciles the two, plus:
 
 - **Session claiming.** A 6-character code (`AB3X-7K`) that the user pastes into the agent binds one tab to one agent session. Keeps strangers out.
-- **Loopback only.** Apps bind to `127.0.0.1`; the gateway only dials loopback URLs. Nothing leaks off the machine.
+- **Local-only.** Apps bind to loopback (TCP `127.0.0.1`) or a private Unix socket; the gateway never binds a port. Nothing leaks off the machine.
 - **Multi-app fan-in.** You can run several apps at once; tools are namespaced by `app.id` so `shop__addItem` and `admin__banUser` never collide.
 
 ## Discovery, not binding
 
 There is exactly one discovery mechanism and it works the same for every runtime:
 
-1. Your app binds a WebSocket server on a loopback port of its choosing.
-2. It writes `~/.tesseron/tabs/<tabId>.json` with the URL it bound.
-3. The gateway (watching that directory) picks up the file and dials the URL with the `tesseron-gateway` WebSocket subprotocol.
+1. Your app binds an endpoint locally - WebSocket on loopback, or a Unix domain socket. Whichever [binding](/protocol/transport/) fits the runtime.
+2. It writes `~/.tesseron/instances/<instanceId>.json` with a `{ kind, url | path }` spec.
+3. The gateway (watching that directory) picks up the file and dials the advertised endpoint via the matching dialer.
 4. Once connected, the app sends `tesseron/hello` and the normal protocol takes over.
 
 No fixed ports. No environment variables. No "which gateway do I connect to". Just bind, announce, serve. If you want to port Tesseron to a new language, that's the entire runtime contract - everything else is libraries of your language's choosing.

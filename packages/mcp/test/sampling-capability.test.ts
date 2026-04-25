@@ -9,7 +9,7 @@ import {
   TesseronErrorCode,
   TesseronGateway,
 } from '../src/index.js';
-import { type Sandbox, prepareSandbox, waitForTabFile } from './setup.js';
+import { type Sandbox, prepareSandbox, waitForInstanceFile } from './setup.js';
 
 let sandbox: Sandbox;
 let gateway: TesseronGateway;
@@ -37,8 +37,8 @@ afterAll(async () => {
 async function connectSdkAndClaim(sdk: ServerTesseronClient): Promise<string> {
   const startedAt = Date.now();
   const connectPromise = sdk.connect();
-  const tab = await waitForTabFile(sandbox, { since: startedAt - 50 });
-  await gateway.connectToApp(tab.tabId, tab.wsUrl);
+  const inst = await waitForInstanceFile(sandbox, { since: startedAt - 50 });
+  await gateway.connectToApp(inst.instanceId, inst.spec);
   const welcome = await connectPromise;
   const code = welcome.claimCode;
   if (!code) throw new Error('gateway did not return a claim code');

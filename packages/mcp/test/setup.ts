@@ -75,79 +75,112 @@ export function prepareSandbox(): Sandbox {
   };
 }
 
-export interface TabRecord {
-  tabId: string;
-  wsUrl: string;
+export interface InstanceRecord {
+  instanceId: string;
+  spec: { kind: 'ws'; url: string } | { kind: 'uds'; path: string };
 }
 
 /**
- * Poll the sandbox's tabs dir for a tab file written by `ServerTesseronClient.connect()`.
+ * Poll the sandbox's instances dir for a v2 manifest written by `ServerTesseronClient.connect()`.
+ * Falls back to the legacy `tabs/` dir for older SDK builds in transition.
  * Returns the most recently written one (suites that claim multiple SDKs call this
  * once per SDK, using the `since` timestamp to dedupe).
  */
-export async function waitForTabFile(
+export async function waitForInstanceFile(
   sandbox: Sandbox,
   options: { since?: number; timeoutMs?: number } = {},
-): Promise<TabRecord> {
+): Promise<InstanceRecord> {
   const since = options.since ?? 0;
   const timeoutMs = options.timeoutMs ?? 4_000;
+  const instancesDir = join(sandbox.dir, '.tesseron', 'instances');
   const tabsDir = join(sandbox.dir, '.tesseron', 'tabs');
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    let best: { instanceId: string; spec: InstanceRecord['spec']; addedAt: number } | undefined;
+    // v2 manifests
+    try {
+      const files = (await readdir(instancesDir)).filter((f) => f.endsWith('.json'));
+      for (const file of files) {
+        try {
+          const raw = await readFile(join(instancesDir, file), 'utf-8');
+          const parsed = JSON.parse(raw) as {
+            version?: number;
+            instanceId?: string;
+            transport?: InstanceRecord['spec'];
+            addedAt?: number;
+          };
+          if (parsed.version !== 2 || !parsed.instanceId || !parsed.transport) continue;
+          const addedAt = parsed.addedAt ?? 0;
+          if (addedAt >= since && (!best || addedAt > best.addedAt)) {
+            best = { instanceId: parsed.instanceId, spec: parsed.transport, addedAt };
+          }
+        } catch {
+          // race with deletion; skip
+        }
+      }
+    } catch {
+      // dir may not exist yet
+    }
+    // v1 fallback: tabs/<id>.json with `wsUrl`
     try {
       const files = (await readdir(tabsDir)).filter((f) => f.endsWith('.json'));
-      // Return the newest matching tab, not just the first. Tests that spin up
-      // multiple SDKs in sequence leave a few tab files around; we need to dial
-      // the one freshly created by THIS connect() call.
-      let best: { tabId: string; wsUrl: string; addedAt: number } | undefined;
       for (const file of files) {
         try {
           const raw = await readFile(join(tabsDir, file), 'utf-8');
           const parsed = JSON.parse(raw) as {
-            tabId: string;
-            wsUrl: string;
+            tabId?: string;
+            wsUrl?: string;
             addedAt?: number;
           };
+          if (!parsed.tabId || !parsed.wsUrl) continue;
           const addedAt = parsed.addedAt ?? 0;
           if (addedAt >= since && (!best || addedAt > best.addedAt)) {
-            best = { tabId: parsed.tabId, wsUrl: parsed.wsUrl, addedAt };
+            best = {
+              instanceId: parsed.tabId,
+              spec: { kind: 'ws', url: parsed.wsUrl },
+              addedAt,
+            };
           }
         } catch {
-          // file may have been deleted mid-read; keep scanning
+          // race with deletion; skip
         }
       }
-      if (best) return { tabId: best.tabId, wsUrl: best.wsUrl };
     } catch {
       // dir may not exist yet
     }
+    if (best) return { instanceId: best.instanceId, spec: best.spec };
     await delay(25);
   }
-  throw new Error(`no new tab file appeared in ${tabsDir} within ${timeoutMs}ms`);
+  throw new Error(
+    `no new instance manifest appeared in ${instancesDir} (or legacy ${tabsDir}) within ${timeoutMs}ms`,
+  );
 }
 
 type ConnectFn<R> = () => Promise<R>;
 
 /**
- * Kick off an SDK-side connect, wait for its tab file to appear in the sandbox,
- * and dial the gateway into it. Works for both fresh `sdk.connect()` calls and
- * resume-flavoured `sdk.connect(undefined, { resume: {...} })` calls — the
- * caller passes a nullary function that invokes connect however it wants, we
- * just sequence the dial.
+ * Kick off an SDK-side connect, wait for its instance manifest to appear in
+ * the sandbox, and dial the gateway into it. Works for both fresh
+ * `sdk.connect()` calls and resume-flavoured `sdk.connect(undefined, { resume:
+ * {...} })` calls — the caller passes a nullary function that invokes connect
+ * however it wants, we just sequence the dial.
  *
  * Returns the connect promise's result so assertions can check welcome fields
  * (or catch ResumeFailed errors).
  */
 export async function dialSdk<R>(
-  gateway: { connectToApp: (tabId: string, wsUrl: string) => Promise<void> },
+  gateway: {
+    connectToApp: (instanceId: string, spec: InstanceRecord['spec']) => Promise<void>;
+  },
   sandbox: Sandbox,
   connect: ConnectFn<R>,
 ): Promise<R> {
   const startedAt = Date.now();
   const promise = connect();
-  // Attach a catch to suppress unhandled rejection warnings if waitForTabFile
+  // Attach a catch to suppress unhandled rejection warnings if waitForInstanceFile
   // throws first (e.g. resume on a dead sandbox).
   promise.catch(() => {});
-  const tab = await waitForTabFile(sandbox, { since: startedAt });
-  await gateway.connectToApp(tab.tabId, tab.wsUrl);
+  const inst = await waitForInstanceFile(sandbox, { since: startedAt });
+  await gateway.connectToApp(inst.instanceId, inst.spec);
   return promise;
 }

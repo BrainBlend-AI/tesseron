@@ -4,14 +4,19 @@ import type {
   AppMetadata,
   ResourceManifestEntry,
   TesseronCapabilities,
+  Transport,
 } from '@tesseron/core';
 import type { JsonRpcDispatcher } from '@tesseron/core/internal';
-import type { WebSocket } from 'ws';
 
 export interface Session {
   id: string;
   app: AppMetadata;
-  ws: WebSocket;
+  /**
+   * Binding-neutral channel to the SDK side. The gateway closes via this on
+   * shutdown; outbound messages go through `dispatcher`. Was `ws: WebSocket`
+   * in v1.0; renamed to drop the WS-only bias.
+   */
+  transport: Transport;
   dispatcher: JsonRpcDispatcher;
   actions: ActionManifestEntry[];
   resources: ResourceManifestEntry[];

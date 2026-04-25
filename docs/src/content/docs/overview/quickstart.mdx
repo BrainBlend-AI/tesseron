@@ -94,7 +94,7 @@ import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
    await tesseron.connect();
    ```
 
-   In the browser, `tesseron.connect()` opens a WebSocket to the Vite plugin at `<location.origin>/@tesseron/ws`, which bridges it to the gateway. In Node, `@tesseron/server` binds a loopback WS server and announces itself via `~/.tesseron/tabs/`; the gateway dials in. Either way, `connect()` resolves with a `welcome` that carries the `claimCode`.
+   In the browser, `tesseron.connect()` opens a WebSocket to the Vite plugin at `<location.origin>/@tesseron/ws`, which bridges it to the gateway. In Node, `@tesseron/server` binds a loopback WS server (or a Unix domain socket if you pass `{ transport: 'uds' }`) and announces itself via `~/.tesseron/instances/`; the gateway dials in. Either way, `connect()` resolves with a `welcome` that carries the `claimCode`.
 
 5. **Claim the session from Claude.** Open your app - the gateway prints a 6-character claim code to its stderr (and you can surface it in your UI too). Tell Claude:
 

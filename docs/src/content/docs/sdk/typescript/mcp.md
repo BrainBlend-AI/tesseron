@@ -1,19 +1,21 @@
 ---
 title: "@tesseron/mcp (MCP gateway)"
-description: The MCP gateway process - a WebSocket client that discovers apps via ~/.tesseron/tabs/ and bridges them to an MCP stdio transport. Bundled into the Claude Code plugin; you rarely run it by hand.
+description: The MCP gateway process - a transport-agnostic dialer that discovers apps via ~/.tesseron/instances/ and bridges them to an MCP stdio transport. Bundled into the Claude Code plugin; you rarely run it by hand.
 related:
   - protocol/handshake
   - protocol/security
   - protocol/transport
+  - protocol/transport-bindings/ws
+  - protocol/transport-bindings/uds
 ---
 
 `@tesseron/mcp` is the MCP gateway. It:
 
-- Watches `~/.tesseron/tabs/` for per-app discovery files and dials each app's WebSocket URL as a client, using the `tesseron-gateway` subprotocol.
+- Watches `~/.tesseron/instances/` (and the legacy `~/.tesseron/tabs/` for one minor) for per-app instance manifests, picks a dialer matching the manifest's `transport.kind`, and connects.
 - Runs an MCP stdio server that the agent connects to.
 - Translates between the two, maintains session state, handles claim codes, fans out progress / sampling / elicitation across the boundary.
 
-The gateway itself binds no ports. It is always a WebSocket client — apps host, the gateway dials. This is what makes the same gateway work for browser tabs (via `@tesseron/vite`), Node processes (via `@tesseron/server`), and anything else that can bind a WS server and write a tab file.
+The gateway itself binds no ports. It is always a transport client — apps host, the gateway dials. This is what makes the same gateway work for browser tabs (via `@tesseron/vite`), Node processes over WebSocket or Unix domain sockets (via `@tesseron/server`), and anything else that can host one of the documented [transport bindings](/protocol/transport/) and write an instance manifest.
 
 99% of users never invoke it directly - the Claude Code plugin spawns it automatically. This page is for the 1%.
 
@@ -23,7 +25,7 @@ The gateway itself binds no ports. It is always a WebSocket client — apps host
 pnpm dlx @tesseron/mcp
 ```
 
-It starts, listens on stdio for MCP, and begins watching `~/.tesseron/tabs/`. Kill it with Ctrl-C.
+It starts, listens on stdio for MCP, and begins watching `~/.tesseron/instances/`. Kill it with Ctrl-C.
 
 ## Environment
 
@@ -37,29 +39,33 @@ The advertised protocol version is pinned to `PROTOCOL_VERSION` in `@tesseron/co
 
 ## Discovery
 
-Apps announce themselves by writing a JSON file to `~/.tesseron/tabs/<tabId>.json`:
+Apps announce themselves by writing a JSON v2 manifest to `~/.tesseron/instances/<instanceId>.json`:
 
-```json
+```jsonc
 {
-  "version": 1,
-  "tabId": "tab-abc123",
+  "version": 2,
+  "instanceId": "inst-abc123",
   "appName": "vue-todo",
-  "wsUrl": "ws://127.0.0.1:64872/",
-  "addedAt": 1777038462692
+  "addedAt": 1777038462692,
+  "transport":
+    | { "kind": "ws",  "url":  "ws://127.0.0.1:64872/" }
+    | { "kind": "uds", "path": "/tmp/tesseron-Xy7/sock" }
 }
 ```
 
-The gateway watches the directory (inotify / `fs.watch`, with a 2-second poll as a platform fallback), notices the new file, and dials `wsUrl` with subprotocol `tesseron-gateway`. The app accepts that one connection; the standard `tesseron/hello` → `welcome` handshake follows.
+The gateway watches the directory (inotify / `fs.watch`, with a 2-second poll as a platform fallback), notices the new file, picks the dialer matching `transport.kind`, and connects. The app accepts that one connection; the standard `tesseron/hello` → `welcome` handshake follows.
 
-When the app process dies, the WebSocket closes and the gateway drops the session. The app is also expected to delete its own tab file on graceful shutdown.
+For one minor version (1.1.x), the gateway also reads the legacy v1 directory `~/.tesseron/tabs/<tabId>.json` and coerces those manifests to `{ kind: 'ws', url: <wsUrl> }`. New SDKs only ever write `instances/`.
+
+When the app process dies, the channel closes and the gateway drops the session. The app is also expected to delete its own manifest on graceful shutdown.
 
 Shipping support for a new runtime is three steps:
 
-1. Bind a WebSocket server on a loopback port.
-2. Write `~/.tesseron/tabs/<tabId>.json` with the URL.
+1. Bind whichever [transport binding](/protocol/transport/) fits the runtime (WS, UDS, …).
+2. Write `~/.tesseron/instances/<instanceId>.json` with the matching `transport` spec.
 3. Accept the gateway's inbound connection and speak the [Tesseron wire protocol](/protocol/).
 
-The SDK packages `@tesseron/vite` and `@tesseron/server` are reference implementations of steps 1 and 2.
+The SDK packages `@tesseron/vite` and `@tesseron/server` are reference implementations.
 
 ## MCP stdio channel
 
@@ -82,7 +88,7 @@ The gateway keeps a `Map<sessionId, Session>` internally. Each session has:
 
 - The registered app manifest (actions + resources).
 - A `pendingClaim` until claimed.
-- The outbound WebSocket the gateway dialed.
+- The outbound transport the gateway dialed.
 - In-flight invocation state.
 
 Routing: `tools/call shop__searchProducts` finds the session whose `app.id === "shop"`, dispatches `actions/invoke`, waits for the response, maps it back to an MCP tool result. If the session dropped between listing and call, the gateway returns error `-32003 ActionNotFound`.
@@ -106,12 +112,15 @@ This esbuild bundle is what ships to plugin installers. If you're hacking on the
 The gateway is a small codebase:
 
 - `packages/mcp/src/cli.ts` - entry point.
-- `packages/mcp/src/gateway.ts` - session management, outbound dialer, tabs-directory watcher.
+- `packages/mcp/src/gateway.ts` - session management, dialer dispatcher, instances-directory watcher.
+- `packages/mcp/src/dialer.ts` - per-binding dialers (`WsDialer`, `UdsDialer`).
 - `packages/mcp/src/session.ts` - a single session's state + claim code.
 - `packages/mcp/src/mcp-bridge.ts` - MCP stdio server + protocol translation.
 
-Adding a new method (e.g., a custom `tesseron__debug_dump` tool) means editing `mcp-bridge.ts` for the MCP side and routing through `gateway.ts` if it also crosses the WebSocket. Keep new methods under a `tesseron__` prefix to avoid colliding with app action tools.
+Adding a new method (e.g., a custom `tesseron__debug_dump` tool) means editing `mcp-bridge.ts` for the MCP side and routing through `gateway.ts` if it also crosses the SDK channel. Keep new methods under a `tesseron__` prefix to avoid colliding with app action tools.
+
+Adding a new **transport binding**: implement `GatewayDialer` for the new `kind`, register it in the gateway constructor, ship a host transport on the SDK side, document the wire format under `/protocol/transport-bindings/`. See [Port Tesseron to your language](/sdk/porting/) for the full rubric.
 
 ## Not for production agents
 
-This is a local developer tool. Apps bind to loopback only; the gateway only dials loopback URLs. If you need remote-agent support, wait for the Phase-4 Streamable HTTP transport or build a reverse-tunnel with explicit authentication in front.
+This is a local developer tool. Apps bind locally only; the gateway only dials local endpoints. If you need remote-agent support, build a reverse-tunnel with explicit authentication in front.
