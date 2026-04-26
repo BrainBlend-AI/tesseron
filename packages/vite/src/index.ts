@@ -167,6 +167,42 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
             return;
           }
 
+          // Single-owner binding. The first gateway to upgrade owns the
+          // session for this instance; later upgrades on the same
+          // instanceId would overwrite `entry.gatewayWs` and silently split
+          // the bridge - the welcome+claim code already left through the
+          // first gateway, so the user-visible code can no longer be
+          // claimed via the second one. Reject with HTTP 409 and let the
+          // race-loser's `dialed.opened` reject; its dispatcher then
+          // backs off via the gateway's poll loop instead of fighting.
+          //
+          // Only reject when the existing slot is CONNECTING (0) or OPEN
+          // (1). CLOSING (2) or CLOSED (3) means the previous owner is on
+          // its way out; the close/error handlers below will null
+          // `gatewayWs` once the event fires, but the new dial may have
+          // arrived first. Treating those as free avoids a stuck slot if
+          // the close event is dropped (rare with abrupt RST).
+          if (
+            entry.gatewayWs &&
+            (entry.gatewayWs.readyState === 0 || entry.gatewayWs.readyState === 1)
+          ) {
+            process.stderr.write(
+              `[tesseron] rejecting second gateway upgrade for instance ${instanceId} (already bound; first-gateway-wins). See tesseron#53.\n`,
+            );
+            const body =
+              'Another Tesseron gateway is already bound to this instance. See tesseron#53.';
+            // socket.end() flushes the response before FIN; socket.destroy()
+            // would issue an RST and the race-loser would see ECONNRESET
+            // instead of the 409, making it indistinguishable from a Vite
+            // crash.
+            socket.end(
+              `HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(
+                body,
+              )}\r\nConnection: close\r\n\r\n${body}`,
+            );
+            return;
+          }
+
           wss.handleUpgrade(req, socket, head, (ws) => {
             entry.gatewayWs = ws;
 
