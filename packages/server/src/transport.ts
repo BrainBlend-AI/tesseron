@@ -1,11 +1,12 @@
 import { Buffer } from 'node:buffer';
 import { existsSync } from 'node:fs';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { type Server, createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Transport } from '@tesseron/core';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
+import { writePrivateFile } from './fs-hygiene.js';
 
 const GATEWAY_SUBPROTOCOL = 'tesseron-gateway';
 
@@ -137,12 +138,8 @@ export class NodeWebSocketServerTransport implements Transport {
   }
 
   private async writeManifest(wsUrl: string): Promise<void> {
-    const instancesDir = getInstancesDir();
-    if (!existsSync(instancesDir)) {
-      await mkdir(instancesDir, { recursive: true });
-    }
-    this.manifestFile = join(instancesDir, `${this.instanceId}.json`);
-    await writeFile(
+    this.manifestFile = join(getInstancesDir(), `${this.instanceId}.json`);
+    await writePrivateFile(
       this.manifestFile,
       JSON.stringify(
         {

@@ -1,9 +1,10 @@
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, unlink } from 'node:fs/promises';
 import { type Server, type Socket, createServer } from 'node:net';
 import { homedir, platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Transport } from '@tesseron/core';
+import { writePrivateFile } from './fs-hygiene.js';
 
 const isWindows = platform() === 'win32';
 
@@ -186,12 +187,8 @@ export class UnixSocketServerTransport implements Transport {
   }
 
   private async writeManifest(socketPath: string): Promise<void> {
-    const instancesDir = getInstancesDir();
-    if (!existsSync(instancesDir)) {
-      await mkdir(instancesDir, { recursive: true });
-    }
-    this.manifestFile = join(instancesDir, `${this.instanceId}.json`);
-    await writeFile(
+    this.manifestFile = join(getInstancesDir(), `${this.instanceId}.json`);
+    await writePrivateFile(
       this.manifestFile,
       JSON.stringify(
         {

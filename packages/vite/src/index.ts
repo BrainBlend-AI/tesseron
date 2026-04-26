@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Plugin, ViteDevServer } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
+import { writePrivateFile } from './fs-hygiene.js';
 
 export interface TesseronViteOptions {
   /** Human-readable app name written to the instance manifest. Defaults to the Vite project directory name. */
@@ -51,10 +52,6 @@ function rawDataToString(data: RawData): string {
   return Buffer.from(data as ArrayBuffer).toString('utf8');
 }
 
-async function ensureInstancesDir(): Promise<void> {
-  await mkdir(getInstancesDir(), { recursive: true });
-}
-
 /** Minimal subset of {@link PendingInstance} the manifest writer needs.
  *  Exported alongside {@link writeInstanceManifest} so a test can call the
  *  helper directly without standing up a real WebSocket. */
@@ -68,11 +65,14 @@ export interface InstanceManifestInput {
  * Exported so the manifest contract can be unit-tested without booting a Vite
  * dev server. `process.pid` and `Date.now()` still come from the runtime, so
  * a test asserts on the pid stamp by inspecting the produced file.
+ *
+ * Uses {@link writePrivateFile} so the manifest lands with mode 0o600 inside
+ * a 0o700 parent dir — a sibling local process under the same user can no
+ * longer enumerate/read instance manifests just by walking `~/.tesseron/`.
  */
 export async function writeInstanceManifest(inst: InstanceManifestInput): Promise<void> {
-  await ensureInstancesDir();
   const file = join(getInstancesDir(), `${inst.instanceId}.json`);
-  await writeFile(
+  await writePrivateFile(
     file,
     JSON.stringify(
       {
