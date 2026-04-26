@@ -22,7 +22,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolResultSchema,
+  LoggingMessageNotificationSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { ServerTesseronClient } from '@tesseron/server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isPidAlive } from '../src/gateway.js';
@@ -270,6 +273,75 @@ describe('claim record breadcrumb in ~/.tesseron/claims/', () => {
     expect(result.text).toContain('No pending session found');
     expect(result.text).not.toContain('different Tesseron gateway');
     expect(result.text).not.toContain('no longer running');
+  });
+});
+
+describe('gateway dial outcomes are forwarded as MCP logging notifications', () => {
+  it('forwards dial-success and tombstone events to the connected MCP client', async () => {
+    // Standalone bridge wired to a Client so we can capture
+    // notifications/message frames. Uses its own gateway so the parent
+    // suite's bridge isn't stealing events.
+    const localGateway = new TesseronGateway();
+    const localBridge = new McpAgentBridge({ gateway: localGateway });
+    const [agentSide, gatewaySide] = InMemoryTransport.createLinkedPair();
+    await localBridge.connect(gatewaySide);
+    const localClient = new Client({ name: 'log-capture', version: '0.0.0' });
+    const messages: Array<{ logger?: string; data: Record<string, unknown> }> = [];
+    localClient.setNotificationHandler(LoggingMessageNotificationSchema, (note) => {
+      const params = note.params as { logger?: string; data: Record<string, unknown> };
+      messages.push({ logger: params.logger, data: params.data });
+    });
+    await localClient.connect(agentSide);
+
+    // Drop a stale-pid manifest into the sandbox; the discovery loop
+    // tombstones it on the next tick and emits a discovery log event.
+    const dir = join(sandbox.dir, '.tesseron', 'instances');
+    await mkdir(dir, { recursive: true });
+    const dead = deadPid();
+    await writeFile(
+      join(dir, 'inst-log-test.json'),
+      JSON.stringify({
+        version: 2,
+        instanceId: 'inst-log-test',
+        appName: 'log capture',
+        addedAt: Date.now(),
+        pid: dead,
+        transport: { kind: 'ws', url: 'ws://127.0.0.1:1/log-test' },
+      }),
+    );
+    const stop = localGateway.watchInstances();
+    await new Promise((r) => setTimeout(r, 250));
+
+    const tombstone = messages.find(
+      (m) =>
+        m.logger === 'tesseron.discovery' &&
+        typeof m.data['message'] === 'string' &&
+        m.data['message'].includes('tombstoned stale instance manifest inst-log-test'),
+    );
+    expect(tombstone, 'expected an MCP logging notification for the tombstone').toBeDefined();
+    expect(tombstone?.data['instanceId']).toBe('inst-log-test');
+    expect(tombstone?.data['pid']).toBe(dead);
+
+    // Now do a real successful dial via a live SDK and confirm we see the
+    // 'connected to app instance' event come through too.
+    const sdk = new ServerTesseronClient();
+    sdk.app({ id: 'log_dial', name: 'log dial', origin: 'http://localhost' });
+    sdk.action('noop').handler(() => 'ok');
+    await dialSdk(localGateway, sandbox, () => sdk.connect());
+
+    const connected = messages.find(
+      (m) =>
+        m.logger === 'tesseron.discovery' &&
+        typeof m.data['message'] === 'string' &&
+        m.data['message'].includes('connected to app instance'),
+    );
+    expect(connected, 'expected an MCP logging notification for the dial-success').toBeDefined();
+    expect(connected?.data['transport']).toBe('ws');
+
+    stop();
+    await sdk.disconnect().catch(() => {});
+    await localClient.close().catch(() => {});
+    await localGateway.stop();
   });
 });
 
