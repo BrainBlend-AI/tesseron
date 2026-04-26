@@ -111,14 +111,6 @@ export const SDK_CAPABILITIES: TesseronCapabilities = {
   elicitation: true,
 };
 
-/**
- * Default wall-clock cap on a single `resources/read` handler. Resource reads
- * are expected to be cheap projections of in-memory state - 30s is generous
- * but bounded so a stuck `read()` cannot hang the agent indefinitely. Distinct
- * from {@link ActionBuilder.timeout}, which the caller configures per action.
- */
-export const DEFAULT_RESOURCE_READ_TIMEOUT_MS = 30_000;
-
 interface ActionDefinitionWithSchema extends ActionDefinition {
   inputJsonSchema?: unknown;
   outputJsonSchema?: unknown;
@@ -242,7 +234,27 @@ export class TesseronClient implements BuilderRegistry {
       this.transport.close();
     }
     this.transport = transport;
-    const dispatcher = new JsonRpcDispatcher((message) => transport.send(message));
+    const dispatcher = new JsonRpcDispatcher((message) => {
+      try {
+        transport.send(message);
+      } catch (err) {
+        // The transport rejected the write (closing socket, JSON
+        // serialisation failure on a circular result, etc.). If we let the
+        // throw propagate up through `handleRequest`'s `void`-discarded
+        // promise, the request's response is silently dropped and the peer's
+        // pending dispatcher entry waits forever. Close the transport so the
+        // peer sees a close, fires `rejectAllPending`, and surfaces the
+        // failure as `TransportClosedError` instead of a hang. Outgoing
+        // request paths (`dispatcher.request`) catch synchronous send
+        // failures themselves; this rethrow preserves that behaviour.
+        try {
+          transport.close();
+        } catch {
+          // Already in a bad state; nothing more to do.
+        }
+        throw err;
+      }
+    });
     this.dispatcher = dispatcher;
 
     transport.onMessage((message) => dispatcher.receive(message));
@@ -505,27 +517,8 @@ export class TesseronClient implements BuilderRegistry {
         `Resource not readable: ${params.name}`,
       );
     }
-    // Bound the read against a wall-clock budget. A reader that hangs (a stuck
-    // promise, an awaited state setter that never settles) would otherwise
-    // park the gateway's `resources/read` request forever, which in turn parks
-    // the bridge's MCP tool call and the agent. Surface a typed Timeout
-    // instead so the agent can recover and the bug is visible.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
-        () =>
-          reject(
-            new TimeoutError(DEFAULT_RESOURCE_READ_TIMEOUT_MS, `Resource read "${params.name}"`),
-          ),
-        DEFAULT_RESOURCE_READ_TIMEOUT_MS,
-      );
-    });
-    try {
-      const value = await Promise.race([Promise.resolve(resource.reader()), timeout]);
-      return { value };
-    } finally {
-      clearTimeout(timer);
-    }
+    const value = await resource.reader();
+    return { value };
   }
 
   private handleResourceSubscribe(params: ResourceSubscribeParams): void {

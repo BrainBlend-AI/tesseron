@@ -182,7 +182,16 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
               const payload: RawData | string = isBinary ? data : rawDataToString(data);
               if (entry.browserWs.readyState === 1 /* OPEN */) {
                 entry.browserWs.send(payload);
+                return;
               }
+              // The browser side of this instance is no longer accepting
+              // messages (closing or closed). Silently dropping the frame
+              // would orphan whichever request the gateway just sent here -
+              // the gateway's dispatcher would wait forever for a response
+              // that can never arrive. Tear down the gateway WS so the
+              // gateway sees a close, fires `rejectAllPending`, and surfaces
+              // the failure to its caller (the MCP tool call) instead.
+              ws.close(1011, 'Browser side of bridge is not OPEN');
             });
 
             ws.on('close', () => {

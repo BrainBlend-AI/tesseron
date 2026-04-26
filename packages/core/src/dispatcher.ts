@@ -112,7 +112,15 @@ export class JsonRpcDispatcher {
     if (!isJsonRpcEnvelope(message)) return;
     if (typeof message.method === 'string') {
       if ('id' in message && message.id !== undefined) {
-        void this.handleRequest(message as unknown as JsonRpcRequest);
+        // Suppress unhandled rejections from `handleRequest`. The transport
+        // wrappers in `@tesseron/core` and `@tesseron/mcp` already close the
+        // channel on send failure so the peer learns about the broken
+        // request via `rejectAllPending`; we don't want a noisy unhandled
+        // rejection on top of that. Any other handler-internal failure has
+        // already been turned into a JSON-RPC error response by
+        // `handleRequest` itself, so there is nothing meaningful left to do
+        // here.
+        this.handleRequest(message as unknown as JsonRpcRequest).catch(() => {});
       } else {
         this.handleNotification(message as unknown as JsonRpcNotification);
       }

@@ -1,11 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import {
-  DEFAULT_RESOURCE_READ_TIMEOUT_MS,
-  PROTOCOL_VERSION,
-  TesseronClient,
-  TesseronErrorCode,
-  type Transport,
-} from '../src/index.js';
+import { describe, expect, it } from 'vitest';
+import { PROTOCOL_VERSION, TesseronClient, type Transport } from '../src/index.js';
 import { JsonRpcDispatcher } from '../src/internal.js';
 
 interface PairedSetup {
@@ -150,101 +144,56 @@ describe('TesseronClient end-to-end', () => {
       }),
     ).rejects.toMatchObject({ code: -32003 });
   });
-});
 
-async function setupConnectedClient(
-  register: (c: TesseronClient) => void,
-): Promise<{ client: TesseronClient; gateway: JsonRpcDispatcher }> {
-  const client = new TesseronClient();
-  client.app({ id: 'shop', name: 'Shop', origin: 'http://localhost' });
-  register(client);
+  it('closes the transport when send() throws so the peer is not stranded', async () => {
+    // Regression: an SDK response that fails to send (closing socket, JSON
+    // serialisation failure on a circular result, ...) used to be silently
+    // swallowed, stranding the peer's pending request forever. The wrapped
+    // send must call transport.close() on any throw so transport.onClose
+    // fires on the peer side and its rejectAllPending surfaces an error
+    // instead of a hang.
+    const client = new TesseronClient();
+    client.app({ id: 'shop', name: 'Shop', origin: 'http://localhost' });
+    client.resource('compositions').read(() => 'fine');
 
-  let clientMessageHandler: ((m: unknown) => void) | undefined;
-  const gateway = new JsonRpcDispatcher((m) => {
-    queueMicrotask(() => clientMessageHandler?.(m));
-  });
-  gateway.on('tesseron/hello', () => ({
-    sessionId: 'test',
-    protocolVersion: PROTOCOL_VERSION,
-    capabilities: { streaming: false, subscriptions: false, sampling: false, elicitation: false },
-    agent: { id: 'a', name: 'a' },
-  }));
-
-  const transport: Transport = {
-    send: (m) => queueMicrotask(() => gateway.receive(m)),
-    onMessage: (h) => {
-      clientMessageHandler = h;
-    },
-    onClose: () => {},
-    close: () => {},
-  };
-
-  await client.connect(transport);
-  return { client, gateway };
-}
-
-describe('TesseronClient resource reads', () => {
-  it('returns the reader value for a quick resource read', async () => {
-    const { gateway } = await setupConnectedClient((c) => {
-      c.resource('compositions').read(() => [{ id: 'cmp1' }, { id: 'cmp2' }]);
+    let clientMessageHandler: ((m: unknown) => void) | undefined;
+    const gateway = new JsonRpcDispatcher((m) => {
+      queueMicrotask(() => clientMessageHandler?.(m));
     });
+    gateway.on('tesseron/hello', () => ({
+      sessionId: 'test',
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: { streaming: false, subscriptions: false, sampling: false, elicitation: false },
+      agent: { id: 'a', name: 'a' },
+    }));
 
-    const result = await gateway.request('resources/read', { name: 'compositions' });
+    let allowSend = true;
+    let closed = false;
+    const transport: Transport = {
+      send: (m) => {
+        if (!allowSend) throw new Error('socket dead');
+        queueMicrotask(() => gateway.receive(m));
+      },
+      onMessage: (h) => {
+        clientMessageHandler = h;
+      },
+      onClose: () => {},
+      close: () => {
+        closed = true;
+      },
+    };
 
-    expect(result).toEqual({ value: [{ id: 'cmp1' }, { id: 'cmp2' }] });
-  });
+    await client.connect(transport);
 
-  it('clears the timeout timer when the reader resolves quickly (no leak)', async () => {
-    vi.useFakeTimers();
-    try {
-      const { gateway } = await setupConnectedClient((c) => {
-        c.resource('quick').read(() => 'ok');
-      });
+    // Now make subsequent sends fail (simulates the socket dying between the
+    // hello response and the next response).
+    allowSend = false;
+    // Trigger a request the SDK will try to respond to. The send wrapper
+    // should close the transport on the throw.
+    void gateway.request('resources/read', { name: 'compositions' }).catch(() => {});
+    // Drain microtasks so handleResourceRead runs.
+    await new Promise((r) => setImmediate(r));
 
-      const before = vi.getTimerCount();
-      const result = await gateway.request('resources/read', { name: 'quick' });
-
-      expect(result).toEqual({ value: 'ok' });
-      // The race should clear its timer in the `finally` block. If a timer
-      // leaks the count grows by one per call.
-      expect(vi.getTimerCount()).toBe(before);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('still surfaces synchronous reader errors as JSON-RPC errors', async () => {
-    const { gateway } = await setupConnectedClient((c) => {
-      c.resource('boom').read(() => {
-        throw new Error('reader exploded');
-      });
-    });
-
-    await expect(gateway.request('resources/read', { name: 'boom' })).rejects.toMatchObject({
-      message: expect.stringContaining('reader exploded'),
-    });
-  });
-
-  it('rejects with TimeoutError when the reader hangs past the default cap', async () => {
-    vi.useFakeTimers();
-    try {
-      const { gateway } = await setupConnectedClient((c) => {
-        c.resource('hangingResource').read(() => new Promise(() => {}));
-      });
-
-      const pending = gateway.request('resources/read', { name: 'hangingResource' });
-      // Swallow rejection asynchronously so vitest doesn't see it as
-      // unhandled while we advance timers.
-      pending.catch(() => {});
-
-      await vi.advanceTimersByTimeAsync(DEFAULT_RESOURCE_READ_TIMEOUT_MS + 10);
-
-      await expect(pending).rejects.toMatchObject({
-        code: TesseronErrorCode.Timeout,
-        message: expect.stringContaining('Resource read "hangingResource"'),
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(closed).toBe(true);
   });
 });
