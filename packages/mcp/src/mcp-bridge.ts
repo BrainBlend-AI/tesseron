@@ -19,7 +19,12 @@ import {
   type TesseronStructuredError,
 } from '@tesseron/core';
 import { assertValidElicitSchema } from '@tesseron/core/internal';
-import type { ForeignClaim, ResourceSubscription, TesseronGateway } from './gateway.js';
+import type {
+  ForeignClaim,
+  GatewayLogEvent,
+  ResourceSubscription,
+  TesseronGateway,
+} from './gateway.js';
 import type { Session } from './session.js';
 
 const META_TOOL_CLAIM_SESSION = 'tesseron__claim_session';
@@ -164,6 +169,12 @@ export class McpAgentBridge {
       capabilities: {
         tools: { listChanged: true },
         resources: { listChanged: true, subscribe: true },
+        // Advertise logging so the SDK doesn't silently no-op
+        // sendLoggingMessage. Used both by the per-action log forwarder
+        // (tools/call -> SDK `log` notification) and by the discovery
+        // event bridge that forwards dial outcomes to the agent so a
+        // developer doesn't have to grep stderr (tesseron#53 concern 4).
+        logging: {},
       },
     });
 
@@ -222,6 +233,27 @@ export class McpAgentBridge {
     this.gateway.on('sessions-changed', () => {
       void this.notifyToolsChanged();
       void this.notifyResourcesChanged();
+    });
+
+    // Forward dial / discovery events to the connected MCP client so a
+    // developer sees connect successes, failures, and stale-manifest
+    // tombstones inline in their MCP client instead of having to grep
+    // ~/.claude/. Pre-`connect()` events are dropped (no agent to tell
+    // yet) and any forward failure is silent — these are advisory, never
+    // load-bearing. See tesseron#53 concern (4).
+    this.gateway.on('gateway-log', (event: GatewayLogEvent) => {
+      if (!this.connected) return;
+      void this.server
+        .sendLoggingMessage({
+          level: event.level === 'warning' ? 'warning' : event.level,
+          logger: `tesseron.${event.category}`,
+          data: {
+            message: event.message,
+            ...(event.instanceId !== undefined ? { instanceId: event.instanceId } : {}),
+            ...(event.meta ?? {}),
+          },
+        })
+        .catch(() => {});
     });
   }
 

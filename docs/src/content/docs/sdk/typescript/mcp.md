@@ -62,6 +62,8 @@ For one minor version (1.1.x), the gateway also reads the legacy v1 directory `~
 
 When the app process dies, the channel closes and the gateway drops the session. The app is also expected to delete its own manifest on graceful shutdown.
 
+Discovery and dial outcomes (connect successes, connect failures, stale-manifest tombstones, foreign-claim probe results) are forwarded to the connected MCP client via `notifications/message` (`logger: "tesseron.discovery"`), so a developer running Claude Code sees them inline rather than having to grep `~/.claude/`. Set the level on the client side via `logging/setLevel` to filter. Stderr still receives the same lines for grep-ability.
+
 Shipping support for a new runtime is three steps:
 
 1. Bind whichever [transport binding](/protocol/transport/) fits the runtime (WS, UDS, …).

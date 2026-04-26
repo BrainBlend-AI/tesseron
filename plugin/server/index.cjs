@@ -19308,6 +19308,18 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    * deletable later — but suppresses the repeated stderr line.
    */
   tombstonedManifests = /* @__PURE__ */ new Set();
+  /**
+   * Write a discovery / dial-outcome event to stderr (kept for grep-ability)
+   * and emit it as `'gateway-log'` so any attached MCP bridge can forward it
+   * to the connected agent via `notifications/message`. Used by the discovery
+   * loop and the dial paths so a developer sees connect successes, failures,
+   * and stale-manifest tombstones inline in their MCP client. See
+   * tesseron#53 concern (4).
+   */
+  emitDiscoveryLog(event) {
+    logToStderr(`[tesseron] ${event.message}`);
+    this.emit("gateway-log", { ...event, category: "discovery" });
+  }
   /** Closes all sessions, outbound connections, and discovery watchers. */
   async stop() {
     this.stopped = true;
@@ -19393,7 +19405,12 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       this.connected.delete(instanceId);
       throw err;
     }
-    logToStderr(`[tesseron] connected to app instance ${instanceId} (${describeSpec(spec)})`);
+    this.emitDiscoveryLog({
+      level: "info",
+      message: `connected to app instance ${instanceId} (${describeSpec(spec)})`,
+      instanceId,
+      meta: { transport: spec.kind }
+    });
   }
   /**
    * Watches `~/.tesseron/instances/` for v2 manifests written by SDK-side
@@ -19428,17 +19445,23 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
               try {
                 await (0, import_promises.unlink)(path);
                 if (!alreadyLogged) {
-                  logToStderr(
-                    `[tesseron] tombstoned stale instance manifest ${instanceId} (pid ${data.pid} no longer running)`
-                  );
+                  this.emitDiscoveryLog({
+                    level: "info",
+                    message: `tombstoned stale instance manifest ${instanceId} (pid ${data.pid} no longer running)`,
+                    instanceId,
+                    meta: { pid: data.pid, path }
+                  });
                 }
                 this.tombstonedManifests.delete(path);
               } catch (unlinkErr) {
                 if (!alreadyLogged) {
                   const reason = unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr);
-                  logToStderr(
-                    `[tesseron] could not tombstone stale manifest ${path} (pid ${data.pid} dead): ${reason} \u2014 remove the file manually if it persists`
-                  );
+                  this.emitDiscoveryLog({
+                    level: "warning",
+                    message: `could not tombstone stale manifest ${path} (pid ${data.pid} dead): ${reason} \u2014 remove the file manually if it persists`,
+                    instanceId,
+                    meta: { pid: data.pid, path, reason }
+                  });
                   this.tombstonedManifests.add(path);
                 }
               }
@@ -19446,7 +19469,12 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
             }
             const id = data.instanceId ?? instanceId;
             this.connectToApp(id, data.transport).catch((err) => {
-              logToStderr(`[tesseron] could not connect to instance ${id}: ${err.message}`);
+              this.emitDiscoveryLog({
+                level: "warning",
+                message: `could not connect to instance ${id}: ${err.message}`,
+                instanceId: id,
+                meta: { reason: err.message }
+              });
             });
           } catch {
           }
@@ -19468,7 +19496,12 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
             if (typeof data.wsUrl !== "string") continue;
             const id = data.tabId ?? tabId;
             this.connectToApp(id, { kind: "ws", url: data.wsUrl }).catch((err) => {
-              logToStderr(`[tesseron] could not connect to legacy tab ${id}: ${err.message}`);
+              this.emitDiscoveryLog({
+                level: "warning",
+                message: `could not connect to legacy tab ${id}: ${err.message}`,
+                instanceId: id,
+                meta: { reason: err.message, legacy: true }
+              });
             });
           } catch {
           }
@@ -25775,7 +25808,13 @@ var McpAgentBridge = class {
     this.server = new Server(serverInfo, {
       capabilities: {
         tools: { listChanged: true },
-        resources: { listChanged: true, subscribe: true }
+        resources: { listChanged: true, subscribe: true },
+        // Advertise logging so the SDK doesn't silently no-op
+        // sendLoggingMessage. Used both by the per-action log forwarder
+        // (tools/call -> SDK `log` notification) and by the discovery
+        // event bridge that forwards dial outcomes to the agent so a
+        // developer doesn't have to grep stderr (tesseron#53 concern 4).
+        logging: {}
       }
     });
     this.registerToolHandlers();
@@ -25821,6 +25860,19 @@ var McpAgentBridge = class {
     this.gateway.on("sessions-changed", () => {
       void this.notifyToolsChanged();
       void this.notifyResourcesChanged();
+    });
+    this.gateway.on("gateway-log", (event) => {
+      if (!this.connected) return;
+      void this.server.sendLoggingMessage({
+        level: event.level === "warning" ? "warning" : event.level,
+        logger: `tesseron.${event.category}`,
+        data: {
+          message: event.message,
+          ...event.instanceId !== void 0 ? { instanceId: event.instanceId } : {},
+          ...event.meta ?? {}
+        }
+      }).catch(() => {
+      });
     });
   }
   /**
