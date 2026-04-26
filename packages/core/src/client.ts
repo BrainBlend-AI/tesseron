@@ -234,7 +234,27 @@ export class TesseronClient implements BuilderRegistry {
       this.transport.close();
     }
     this.transport = transport;
-    const dispatcher = new JsonRpcDispatcher((message) => transport.send(message));
+    const dispatcher = new JsonRpcDispatcher((message) => {
+      try {
+        transport.send(message);
+      } catch (err) {
+        // The transport rejected the write (closing socket, JSON
+        // serialisation failure on a circular result, etc.). If we let the
+        // throw propagate up through `handleRequest`'s `void`-discarded
+        // promise, the request's response is silently dropped and the peer's
+        // pending dispatcher entry waits forever. Close the transport so the
+        // peer sees a close, fires `rejectAllPending`, and surfaces the
+        // failure as `TransportClosedError` instead of a hang. Outgoing
+        // request paths (`dispatcher.request`) catch synchronous send
+        // failures themselves; this rethrow preserves that behaviour.
+        try {
+          transport.close();
+        } catch {
+          // Already in a bad state; nothing more to do.
+        }
+        throw err;
+      }
+    });
     this.dispatcher = dispatcher;
 
     transport.onMessage((message) => dispatcher.receive(message));

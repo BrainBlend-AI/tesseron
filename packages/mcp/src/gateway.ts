@@ -569,8 +569,21 @@ export class TesseronGateway extends EventEmitter {
     const dispatcher = new JsonRpcDispatcher((message) => {
       try {
         transport.send(message);
-      } catch {
-        // channel likely closed; ignore
+      } catch (err) {
+        // The channel is in an unrecoverable state (closing socket, broken
+        // pipe, JSON serialisation failure on a circular result, ...). If we
+        // silently swallow we strand whichever pending request just lost its
+        // response, and the bridge waits forever. Tear down the channel so
+        // `transport.onClose` fires below, `rejectAllPending` rejects every
+        // outstanding request with `TransportClosedError`, and the failure
+        // surfaces to the bridge / MCP tool call instead of hanging.
+        const reason = err instanceof Error ? err.message : String(err);
+        logToStderr(`[tesseron] session transport send failed (${reason}); closing channel`);
+        try {
+          transport.close();
+        } catch {
+          // The transport is already in a bad state; nothing more to do.
+        }
       }
     });
 

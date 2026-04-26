@@ -144,4 +144,56 @@ describe('TesseronClient end-to-end', () => {
       }),
     ).rejects.toMatchObject({ code: -32003 });
   });
+
+  it('closes the transport when send() throws so the peer is not stranded', async () => {
+    // Regression: an SDK response that fails to send (closing socket, JSON
+    // serialisation failure on a circular result, ...) used to be silently
+    // swallowed, stranding the peer's pending request forever. The wrapped
+    // send must call transport.close() on any throw so transport.onClose
+    // fires on the peer side and its rejectAllPending surfaces an error
+    // instead of a hang.
+    const client = new TesseronClient();
+    client.app({ id: 'shop', name: 'Shop', origin: 'http://localhost' });
+    client.resource('compositions').read(() => 'fine');
+
+    let clientMessageHandler: ((m: unknown) => void) | undefined;
+    const gateway = new JsonRpcDispatcher((m) => {
+      queueMicrotask(() => clientMessageHandler?.(m));
+    });
+    gateway.on('tesseron/hello', () => ({
+      sessionId: 'test',
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: { streaming: false, subscriptions: false, sampling: false, elicitation: false },
+      agent: { id: 'a', name: 'a' },
+    }));
+
+    let allowSend = true;
+    let closed = false;
+    const transport: Transport = {
+      send: (m) => {
+        if (!allowSend) throw new Error('socket dead');
+        queueMicrotask(() => gateway.receive(m));
+      },
+      onMessage: (h) => {
+        clientMessageHandler = h;
+      },
+      onClose: () => {},
+      close: () => {
+        closed = true;
+      },
+    };
+
+    await client.connect(transport);
+
+    // Now make subsequent sends fail (simulates the socket dying between the
+    // hello response and the next response).
+    allowSend = false;
+    // Trigger a request the SDK will try to respond to. The send wrapper
+    // should close the transport on the throw.
+    void gateway.request('resources/read', { name: 'compositions' }).catch(() => {});
+    // Drain microtasks so handleResourceRead runs.
+    await new Promise((r) => setImmediate(r));
+
+    expect(closed).toBe(true);
+  });
 });
