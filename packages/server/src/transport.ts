@@ -21,7 +21,16 @@ function getInstancesDir(): string {
 }
 
 function generateInstanceId(): string {
-  return `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  // CSPRNG-sourced like the rest of `~/.tesseron/*` writes. Instance IDs
+  // aren't bearer tokens (the gateway still requires the standard
+  // handshake), but a predictable id is a side channel — a sibling
+  // process that observes one id can narrow the manifest namespace
+  // for the next, and the consistency with claim/session/resume token
+  // generation matters for review.
+  const buf = new Uint8Array(4);
+  globalThis.crypto.getRandomValues(buf);
+  const rand = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `inst-${Date.now().toString(36)}-${rand}`;
 }
 
 export interface NodeWebSocketServerTransportOptions {

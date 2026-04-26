@@ -129,6 +129,68 @@ describe('writePrivateFile', () => {
     expect(payloads).toContain(final);
   });
 
+  it('a reader never observes a partial or empty file mid-write', async () => {
+    // The whole point of temp+rename is: a concurrent reader sees either
+    // the previous contents or the new contents, never a half-written
+    // mixture and never a zero-length file. The earlier "concurrent
+    // writes" test only checked the *final* state of the target. This
+    // one explicitly observes the file *while* writes are in flight,
+    // and asserts every read lands on one of the contended payloads in
+    // full.
+    //
+    // A regression that switched the implementation to a direct
+    // `writeFile(target, ...)` (losing atomicity) would surface here as
+    // either a zero-length read between truncation and the first
+    // payload byte, or a short read while bytes are still being
+    // streamed in. Either failure mode is detected immediately.
+    const target = join(sandbox, 'partial-write.txt');
+    const { readFileSync: readSync, existsSync } = await import('node:fs');
+
+    // Use payloads large enough that a non-atomic write would have a
+    // realistic chance of being observed mid-flight, but small enough
+    // that the test stays fast: 4 KB each.
+    const payloadA = 'A'.repeat(4096);
+    const payloadB = 'B'.repeat(4096);
+
+    await writePrivateFile(target, payloadA);
+
+    let stop = false;
+    const writer = (async () => {
+      for (let i = 0; i < 50 && !stop; i++) {
+        const payload = i % 2 === 0 ? payloadB : payloadA;
+        try {
+          await writePrivateFile(target, payload);
+        } catch {
+          // Tolerate Windows EPERM-on-concurrent-rename; the failed
+          // write leaves the target at its pre-write payload, which
+          // is still one of the two valid observations.
+        }
+      }
+    })();
+
+    const observations: string[] = [];
+    const reader = (async () => {
+      while (!stop) {
+        if (existsSync(target)) {
+          observations.push(readSync(target, 'utf8'));
+        }
+        // Yield the event loop so the writer's microtasks run.
+        await new Promise<void>((r) => setImmediate(r));
+      }
+    })();
+
+    await writer;
+    stop = true;
+    await reader;
+
+    expect(observations.length).toBeGreaterThan(0);
+    for (const obs of observations) {
+      // Every observation must be exactly one of the two payloads.
+      // A truncated/empty/mixed read fails the assertion.
+      expect(obs === payloadA || obs === payloadB).toBe(true);
+    }
+  });
+
   it('cleans up stray .tmp.* files after a successful write', async () => {
     // Repeated writes should not accumulate temp files in the parent dir.
     // Asserts we either rename or unlink the temp every time, never leak.

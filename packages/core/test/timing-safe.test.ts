@@ -38,13 +38,18 @@ describe('constantTimeEqual', () => {
     expect(constantTimeEqual('AB3X-7K', 'AB3X-XK')).toBe(false); // middle char
   });
 
-  it('returns false when an argument is not a string', () => {
+  it('throws TypeError when an argument is not a string', () => {
     // Calls intentionally pass non-string values to verify the runtime
-    // guard. TypeScript would flag these in normal code.
-    expect(constantTimeEqual('abc', 123 as unknown as string)).toBe(false);
-    expect(constantTimeEqual(undefined as unknown as string, 'abc')).toBe(false);
-    expect(constantTimeEqual(null as unknown as string, null as unknown as string)).toBe(false);
-    expect(constantTimeEqual('abc', { length: 3 } as unknown as string)).toBe(false);
+    // guard. TypeScript would flag these in normal code; at runtime we
+    // throw rather than silently returning false because a type-violating
+    // call is a programmer bug whose symptoms (token mismatch errors)
+    // would otherwise burn hours of debugging the wrong hypothesis.
+    expect(() => constantTimeEqual('abc', 123 as unknown as string)).toThrow(TypeError);
+    expect(() => constantTimeEqual(undefined as unknown as string, 'abc')).toThrow(TypeError);
+    expect(() => constantTimeEqual(null as unknown as string, null as unknown as string)).toThrow(
+      TypeError,
+    );
+    expect(() => constantTimeEqual('abc', { length: 3 } as unknown as string)).toThrow(TypeError);
   });
 
   it('handles non-ASCII characters via charCodeAt', () => {

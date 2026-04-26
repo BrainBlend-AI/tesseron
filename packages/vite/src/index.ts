@@ -43,6 +43,17 @@ function getInstancesDir(): string {
   return join(homedir(), '.tesseron', 'instances');
 }
 
+function generateInstanceId(): string {
+  // CSPRNG-sourced like the rest of `~/.tesseron/*` writes. Instance IDs
+  // aren't bearer tokens (the gateway still requires the standard
+  // handshake), but the consistency with claim/session/resume token
+  // generation matters for security review.
+  const buf = new Uint8Array(4);
+  globalThis.crypto.getRandomValues(buf);
+  const rand = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `inst-${Date.now().toString(36)}-${rand}`;
+}
+
 /** Decode a `ws` text-frame payload back to a string. `ws` always emits a
  * Buffer (or Buffer fragments) for text frames; we just need UTF-8 it. */
 function rawDataToString(data: RawData): string {
@@ -137,7 +148,7 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
           if (protocols.includes(GATEWAY_SUBPROTOCOL)) return;
 
           wss.handleUpgrade(req, socket, head, (ws) => {
-            const instanceId = `inst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            const instanceId = generateInstanceId();
             const wsUrl = `${serverUrl.replace(/^http/, 'ws')}${WS_PATH_PREFIX}/${instanceId}`;
             const appName =
               options.appName ??
