@@ -1,5 +1,12 @@
 # @tesseron/server
 
+## 2.3.0
+
+### Patch Changes
+
+- Updated dependencies [[`f0e671f`](https://github.com/BrainBlend-AI/tesseron/commit/f0e671f1c26195cc597ce90cb2ad8f8f59dd7e9f)]:
+  - @tesseron/core@2.3.0
+
 ## 2.2.2
 
 ### Patch Changes
