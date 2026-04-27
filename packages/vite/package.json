@@ -38,6 +38,7 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
+    "@tesseron/core": "workspace:*",
     "ws": "^8.18.0"
   },
   "devDependencies": {

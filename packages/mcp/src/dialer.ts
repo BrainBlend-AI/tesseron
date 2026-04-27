@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { connect as netConnect } from 'node:net';
 import type { Transport, TransportSpec } from '@tesseron/core';
+import { formatBindSubprotocol } from '@tesseron/core/internal';
 import { type RawData, WebSocket } from 'ws';
 
 /**
@@ -9,6 +10,19 @@ import { type RawData, WebSocket } from 'ws';
  * and `@tesseron/vite`'s bridge.
  */
 export const GATEWAY_SUBPROTOCOL = 'tesseron-gateway';
+
+/**
+ * Per-dial options the gateway threads through to the dialer.
+ *
+ * `bindCode` is the host-minted claim code the gateway carries on the WS
+ * upgrade as a `tesseron-bind.<code>` subprotocol element. The host
+ * (`@tesseron/vite`, `@tesseron/server`) validates this against its
+ * in-memory `hostMintedClaim.code`; a mismatch rejects the upgrade.
+ * Absent for legacy auto-dials. See tesseron#60.
+ */
+export interface DialerOptions {
+  bindCode?: string;
+}
 
 /**
  * Internal handle returned by a {@link GatewayDialer}. Wraps a {@link Transport}
@@ -38,7 +52,7 @@ export interface DialedTransport {
  */
 export interface GatewayDialer<K extends TransportSpec['kind'] = TransportSpec['kind']> {
   readonly kind: K;
-  dial(spec: Extract<TransportSpec, { kind: K }>): DialedTransport;
+  dial(spec: Extract<TransportSpec, { kind: K }>, options?: DialerOptions): DialedTransport;
 }
 
 /**
@@ -53,8 +67,18 @@ export interface GatewayDialer<K extends TransportSpec['kind'] = TransportSpec['
 export class WsDialer implements GatewayDialer<'ws'> {
   readonly kind = 'ws' as const;
 
-  dial(spec: { kind: 'ws'; url: string }): DialedTransport {
-    const ws = new WebSocket(spec.url, [GATEWAY_SUBPROTOCOL]);
+  dial(spec: { kind: 'ws'; url: string }, options: DialerOptions = {}): DialedTransport {
+    // When the gateway is dialing in response to a host-minted-claim
+    // `tesseron__claim_session` call, attach the bind code as a second
+    // subprotocol element (`tesseron-bind.<code>`). The host's upgrade
+    // handler parses this and validates against its in-memory
+    // `hostMintedClaim.code`; a mismatch produces a 4xx response on the
+    // upgrade and the dial rejects. See `@tesseron/core/bind-subprotocol`.
+    const subprotocols: string[] = [GATEWAY_SUBPROTOCOL];
+    if (options.bindCode !== undefined) {
+      subprotocols.push(formatBindSubprotocol(options.bindCode));
+    }
+    const ws = new WebSocket(spec.url, subprotocols);
 
     const messageHandlers: Array<(message: unknown) => void> = [];
     const closeHandlers: Array<(reason?: string) => void> = [];
@@ -130,7 +154,10 @@ export class WsDialer implements GatewayDialer<'ws'> {
 export class UdsDialer implements GatewayDialer<'uds'> {
   readonly kind = 'uds' as const;
 
-  dial(spec: { kind: 'uds'; path: string }): DialedTransport {
+  dial(spec: { kind: 'uds'; path: string }, _options: DialerOptions = {}): DialedTransport {
+    // UDS path doesn't carry the bind subprotocol — the file-mode-based
+    // UID enforcement on the socket inode is the access gate. Host-mint
+    // claim flow on UDS is tracked separately as a follow-up to #60.
     const socket = netConnect({ path: spec.path });
 
     const messageHandlers: Array<(message: unknown) => void> = [];

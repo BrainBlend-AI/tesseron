@@ -5,6 +5,7 @@ import { readFile, readdir, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  type AgentIdentity,
   type ElicitationRequestParams,
   type ElicitationResult,
   type HelloParams,
@@ -219,6 +220,24 @@ export class TesseronGateway extends EventEmitter {
    * deletable later — but suppresses the repeated stderr line.
    */
   private readonly tombstonedManifests = new Set<string>();
+  /**
+   * Manifests with `helloHandledByHost: true` discovered via `watchInstances`
+   * but NOT auto-dialed. The gateway dials these only on
+   * `tesseron__claim_session` when a code matches an entry's
+   * `hostMintedClaim.code`. See tesseron#60.
+   */
+  private readonly hostMintedInstances = new Map<string, InstanceManifest>();
+  /**
+   * In-flight `claimSession` deferreds keyed by instanceId, populated before
+   * the gateway dials a host-minted instance and resolved by the hello
+   * handler when the v3 mode session is registered. Lets `claimSession`
+   * await the round-trip from "dialed" to "session marked claimed" and
+   * return the resulting `Session` synchronously to its caller.
+   */
+  private readonly hostMintedClaimResolvers = new Map<
+    string,
+    { resolve: (s: Session) => void; reject: (err: Error) => void }
+  >();
 
   constructor(private readonly options: GatewayOptions = {}) {
     super();
@@ -325,7 +344,11 @@ export class TesseronGateway extends EventEmitter {
    * @param instanceId - Unique ID assigned by the SDK side; used to deduplicate.
    * @param spec - {@link TransportSpec} discriminating which dialer to use.
    */
-  async connectToApp(instanceId: string, spec: TransportSpec): Promise<void> {
+  async connectToApp(
+    instanceId: string,
+    spec: TransportSpec,
+    options: { bindCode?: string } = {},
+  ): Promise<void> {
     if (this.connected.has(instanceId)) return;
     const dialer = this.dialers.get(spec.kind);
     if (!dialer) {
@@ -334,9 +357,11 @@ export class TesseronGateway extends EventEmitter {
     // Synchronously dial and register handlers BEFORE awaiting opened, so an
     // in-process peer that fires `tesseron/hello` synchronously inside its
     // own upgrade handler isn't dropped on the floor (see WsDialer comment).
-    const dialed = dialer.dial(spec as never);
+    const dialed = dialer.dial(spec as never, { bindCode: options.bindCode });
     this.connected.set(instanceId, dialed);
-    this.handleConnection(dialed.transport, undefined);
+    const bindContext =
+      options.bindCode !== undefined ? { instanceId, code: options.bindCode } : undefined;
+    this.handleConnection(dialed.transport, undefined, bindContext);
     dialed.onClose(() => {
       this.connected.delete(instanceId);
     });
@@ -424,6 +449,22 @@ export class TesseronGateway extends EventEmitter {
               continue;
             }
             const id = data.instanceId ?? instanceId;
+            // Host-mint flow (tesseron#60): the SDK side owns the claim
+            // code and asks us NOT to auto-dial. We remember the manifest
+            // here so `claimSession` can scan it on the user-typed code,
+            // but don't pipe bytes until that scan matches. The host's
+            // welcome already showed the user-pasteable code; auto-dialing
+            // here would race that and either confuse the SDK with two
+            // codes (legacy gateway-mints) or burn a bind without the
+            // user ever asking for one.
+            if (data.helloHandledByHost === true) {
+              this.hostMintedInstances.set(id, data as InstanceManifest);
+              continue;
+            }
+            // Drop a stale entry if a manifest flips from host-mint back to
+            // legacy (in practice never happens, but the in-memory map is
+            // a soft cache; a missing flag should let auto-dial proceed).
+            this.hostMintedInstances.delete(id);
             this.connectToApp(id, data.transport).catch((err: Error) => {
               this.emitDiscoveryLog({
                 level: 'warning',
@@ -582,43 +623,95 @@ export class TesseronGateway extends EventEmitter {
    * `sessions-changed` on success and a `tesseron/claimed` notification to the
    * SDK so consumers can clear the now-spent `claimCode` from their UI.
    */
-  claimSession(claimCode: string): Session | null {
-    const sessionId = this.pendingClaims.get(claimCode.toUpperCase());
-    if (!sessionId) return null;
-    const session = this.sessions.get(sessionId);
-    if (!session || session.claimed) return null;
-    session.claimed = true;
-    session.claimedAt = Date.now();
-    this.pendingClaims.delete(claimCode.toUpperCase());
-    // Drop the cross-gateway breadcrumb so a sibling gateway doesn't keep
-    // pointing the user at this code once it's been spent. Await the
-    // write-promise stashed at hello time first — a fast-claim that beat the
-    // disk write would otherwise unlink-before-write and leave the late
-    // write orphaned forever (post-claim, no path removes it). The remove
-    // itself is still fire-and-forget for the synchronous return value.
-    void awaitThenRemoveClaimRecord(session.claimRecordWritten, claimCode);
-    // Tell the SDK side the session is now claimed. The browser app's
-    // `useTesseronConnection` hook clears `connection.claimCode` on receipt
-    // so the UI stops displaying a code that can no longer be redeemed.
-    // notify() is fire-and-forget; the dispatcher's send wrapper handles any
-    // transport-level failures by closing the channel, so no try/catch here.
-    //
-    // Use the same `pending` / `Awaiting agent` fallback the welcome uses
-    // when `clientName` isn't populated. The MCP `initialize` always runs
-    // before `tools/call`, so in practice `clientName` is set by the time
-    // we get here, but the symmetric fallback avoids silently regressing a
-    // previously-meaningful welcome agent if some embedder reaches
-    // `claimSession` without an `initialize` having happened.
-    const clientName = this.agentCapabilities.clientName;
-    session.dispatcher.notify('tesseron/claimed', {
-      agent: {
-        id: clientName ?? 'pending',
-        name: clientName ?? 'Awaiting agent',
-      },
-      claimedAt: session.claimedAt,
-    });
-    this.emit('sessions-changed');
-    return session;
+  async claimSession(claimCode: string): Promise<Session | null> {
+    const upper = claimCode.toUpperCase();
+    // Legacy v1.1 path: the gateway itself minted this code, the session is
+    // already alive in `sessions` waiting for a claim. Common path on
+    // existing deployments and the only path until tesseron#60 lands hosts
+    // that mint locally.
+    const sessionId = this.pendingClaims.get(upper);
+    if (sessionId !== undefined) {
+      const session = this.sessions.get(sessionId);
+      if (!session || session.claimed) return null;
+      session.claimed = true;
+      session.claimedAt = Date.now();
+      this.pendingClaims.delete(upper);
+      void awaitThenRemoveClaimRecord(session.claimRecordWritten, claimCode);
+      const clientName = this.agentCapabilities.clientName;
+      session.dispatcher.notify('tesseron/claimed', {
+        agent: {
+          id: clientName ?? 'pending',
+          name: clientName ?? 'Awaiting agent',
+        },
+        claimedAt: session.claimedAt,
+      });
+      this.emit('sessions-changed');
+      return session;
+    }
+
+    // Host-mint path (tesseron#60): scan every host-minted manifest the
+    // discovery loop has remembered for one whose `hostMintedClaim.code`
+    // matches. If found, dial that instance with the bind subprotocol
+    // carrying the code; the host validates the bind and the gateway's
+    // hello handler (in v3 mode, gated on `bindContext`) registers a
+    // pre-claimed session and resolves the deferred set up here.
+    for (const [instanceId, manifest] of this.hostMintedInstances) {
+      const minted = manifest.hostMintedClaim;
+      if (!minted || minted.code.toUpperCase() !== upper) continue;
+      if (minted.boundAgent !== null) {
+        // Manifest reports the code is already spent. Treat as foreign-
+        // claim-style miss; the bridge surfaces a useful message.
+        return null;
+      }
+      // Set up the deferred BEFORE dialing so the in-process synchronous
+      // hello handler can resolve it without a tick race.
+      const claimed = new Promise<Session>((resolve, reject) => {
+        this.hostMintedClaimResolvers.set(instanceId, { resolve, reject });
+      });
+      try {
+        await this.connectToApp(instanceId, manifest.transport, { bindCode: minted.code });
+      } catch (err) {
+        this.hostMintedClaimResolvers.delete(instanceId);
+        this.emitDiscoveryLog({
+          level: 'warning',
+          message: `host-mint dial for instance ${instanceId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          instanceId,
+          meta: { code: upper },
+        });
+        return null;
+      }
+      // Wait for the v3 hello handler to fire and create the session. A
+      // 5 s ceiling guards against a host that never sends hello after the
+      // bind upgrade — without it `claimSession` would hang forever and the
+      // MCP tool call along with it.
+      const timer = setTimeout(() => {
+        const pending = this.hostMintedClaimResolvers.get(instanceId);
+        if (pending) {
+          this.hostMintedClaimResolvers.delete(instanceId);
+          pending.reject(new Error('host-mint bind succeeded but hello never arrived'));
+        }
+      }, 5000);
+      try {
+        const session = await claimed;
+        clearTimeout(timer);
+        // Once the session is registered, the entry can leave the
+        // discovery cache — the file may still exist but it's been
+        // consumed. A future poll won't re-add because `connected` now
+        // covers the instance.
+        this.hostMintedInstances.delete(instanceId);
+        return session;
+      } catch (err) {
+        clearTimeout(timer);
+        this.emitDiscoveryLog({
+          level: 'warning',
+          message: `host-mint claim for instance ${instanceId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          instanceId,
+          meta: { code: upper },
+        });
+        return null;
+      }
+    }
+    return null;
   }
 
   /**
@@ -741,7 +834,11 @@ export class TesseronGateway extends EventEmitter {
    * directly. `origin` is supplied by WS-binding code that knows the upgrade
    * request's `Origin` header; UDS and stdio bindings pass `undefined`.
    */
-  handleConnection(transport: Transport, origin?: string): void {
+  handleConnection(
+    transport: Transport,
+    origin?: string,
+    bindContext?: { instanceId: string; code: string },
+  ): void {
     const dispatcher = new JsonRpcDispatcher((message) => {
       try {
         transport.send(message);
@@ -866,8 +963,86 @@ export class TesseronGateway extends EventEmitter {
       }
 
       const sessionId = generateSessionId();
-      const claimCode = generateClaimCode();
       const resumeToken = generateResumeToken();
+
+      // Host-minted-claim path: the gateway dialed in response to a
+      // `tesseron__claim_session` call that matched a manifest with
+      // `helloHandledByHost: true`. The bind code already authenticated the
+      // dial via the `tesseron-bind.<code>` subprotocol; the session is born
+      // claimed and there's no pending-claims registration. The host (Vite
+      // plugin / `@tesseron/server`) already showed the user-typed code in
+      // its synthesized welcome, so the gateway's welcome MUST NOT echo
+      // another claim code — that would race the host's UI and confuse
+      // consumers. See tesseron#60.
+      if (bindContext) {
+        const claimedAt = Date.now();
+        const clientName = this.agentCapabilities.clientName;
+        const agent: AgentIdentity = {
+          id: clientName ?? 'pending',
+          name: clientName ?? 'Awaiting agent',
+        };
+        session = {
+          id: sessionId,
+          app: helloParams.app,
+          transport,
+          dispatcher,
+          actions: helloParams.actions,
+          resources: helloParams.resources,
+          capabilities: helloParams.capabilities,
+          claimCode: bindContext.code,
+          claimed: true,
+          claimedAt,
+          resumeToken,
+        };
+        this.sessions.set(sessionId, session);
+        logToStderr(
+          `[tesseron] host-mint session "${helloParams.app.name}" (${sessionId}) — bound to claim code ${bindContext.code}`,
+        );
+        // Resolve the deferred set up by `claimSession` BEFORE dialing, so
+        // the bridge can return success synchronously after the dial round-
+        // trip completes.
+        const pending = this.hostMintedClaimResolvers.get(bindContext.instanceId);
+        if (pending) {
+          this.hostMintedClaimResolvers.delete(bindContext.instanceId);
+          pending.resolve(session);
+        }
+        // Send `tesseron/claimed` to the SDK side AFTER returning the
+        // welcome — `setImmediate` puts the notification on a tick after
+        // the dispatcher's response goes out, so the SDK sees welcome then
+        // claimed in order. The bridge separately listens to
+        // `sessions-changed` to refresh the MCP tool list.
+        const claimedSession = session;
+        setImmediate(() => {
+          try {
+            claimedSession.dispatcher.notify('tesseron/claimed', {
+              agent,
+              claimedAt,
+            });
+          } catch {
+            // The transport may have closed between scheduling and now;
+            // a missed notification only means the SDK keeps an already-
+            // spent code in its UI for one more session. Not worth
+            // surfacing.
+          }
+          this.emit('sessions-changed');
+        });
+        return {
+          sessionId,
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: {
+            streaming: true,
+            subscriptions: true,
+            sampling: this.agentCapabilities.sampling,
+            elicitation: this.agentCapabilities.elicitation,
+          },
+          agent,
+          // No claimCode in the response — the host's synthesized welcome
+          // already showed it. Repeating here would race the SDK's UI.
+          resumeToken,
+        };
+      }
+
+      const claimCode = generateClaimCode();
       session = {
         id: sessionId,
         app: helloParams.app,

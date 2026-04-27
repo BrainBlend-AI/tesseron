@@ -87,10 +87,13 @@ describe('constantTimeEqual', () => {
     const lateMs = Number(process.hrtime.bigint() - t1) / 1e6;
 
     // Fail only if early-diff is implausibly faster than late-diff. A
-    // generous 4x ceiling tolerates JIT warm-up and runtime jitter while
-    // still catching a `for (..) if (!=) return false` regression.
+    // 10x ceiling tolerates JIT warm-up and CI-runner jitter (the previous
+    // 4x ceiling flaked at ~4.4x on shared-core CI hosts) while still
+    // catching the regression we actually care about: a refactor to
+    // `for (..) if (!=) return false` would make the early-diff loop
+    // hundreds of times faster on length 1024.
     const ratio = lateMs === 0 ? Number.POSITIVE_INFINITY : earlyMs / lateMs;
-    expect(ratio).toBeGreaterThan(0.25);
-    expect(ratio).toBeLessThan(4);
+    expect(ratio).toBeGreaterThan(0.1);
+    expect(ratio).toBeLessThan(10);
   });
 });

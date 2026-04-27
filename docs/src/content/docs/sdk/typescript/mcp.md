@@ -60,6 +60,8 @@ The gateway watches the directory (inotify / `fs.watch`, with a 2-second poll as
 
 For one minor version (1.1.x), the gateway also reads the legacy v1 directory `~/.tesseron/tabs/<tabId>.json` and coerces those manifests to `{ kind: 'ws', url: <wsUrl> }`. New SDKs only ever write `instances/`.
 
+A v1.2-aware host (the `@tesseron/vite` plugin since 2.2.0) writes two extra optional fields alongside the v2 baseline: `helloHandledByHost: true` and `hostMintedClaim: { code, sessionId, mintedAt, boundAgent }`. The gateway treats these as the signal "don't auto-dial; wait for `tesseron__claim_session`". When the user pastes the host-minted code, the gateway scans every host-mint manifest for a matching `hostMintedClaim.code`, dials only that one with a `tesseron-bind.<code>` subprotocol element on the upgrade, and the host validates the bind in constant time before accepting. v1.1 gateways ignore the new fields and fall back to legacy auto-dial; v1.2 hosts paired with v1.1 gateways detect the absent bind subprotocol and serve the legacy gateway-mints flow. See [tesseron#60](https://github.com/BrainBlend-AI/tesseron/issues/60).
+
 When the app process dies, the channel closes and the gateway drops the session. The app is also expected to delete its own manifest on graceful shutdown.
 
 Discovery and dial outcomes (connect successes, connect failures, stale-manifest tombstones, foreign-claim probe results) are forwarded to the connected MCP client via `notifications/message` (`logger: "tesseron.discovery"`), so a developer running Claude Code sees them inline rather than having to grep `~/.claude/`. Set the level on the client side via `logging/setLevel` to filter. Stderr still receives the same lines for grep-ability.

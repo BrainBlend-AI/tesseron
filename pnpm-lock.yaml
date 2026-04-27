@@ -387,6 +387,9 @@ importers:
 
   packages/vite:
     dependencies:
+      '@tesseron/core':
+        specifier: workspace:*
+        version: link:../core
       ws:
         specifier: ^8.18.0
         version: 8.20.0
