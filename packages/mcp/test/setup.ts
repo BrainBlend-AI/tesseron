@@ -78,6 +78,12 @@ export function prepareSandbox(): Sandbox {
 export interface InstanceRecord {
   instanceId: string;
   spec: { kind: 'ws'; url: string } | { kind: 'uds'; path: string };
+  /** Present when the host wrote a v1.2 `helloHandledByHost` manifest. */
+  hostMintedClaim?: {
+    code: string;
+    sessionId: string;
+    resumeToken: string;
+  };
 }
 
 /**
@@ -96,7 +102,14 @@ export async function waitForInstanceFile(
   const tabsDir = join(sandbox.dir, '.tesseron', 'tabs');
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    let best: { instanceId: string; spec: InstanceRecord['spec']; addedAt: number } | undefined;
+    let best:
+      | {
+          instanceId: string;
+          spec: InstanceRecord['spec'];
+          addedAt: number;
+          hostMintedClaim?: InstanceRecord['hostMintedClaim'];
+        }
+      | undefined;
     // v2 manifests
     try {
       const files = (await readdir(instancesDir)).filter((f) => f.endsWith('.json'));
@@ -108,11 +121,25 @@ export async function waitForInstanceFile(
             instanceId?: string;
             transport?: InstanceRecord['spec'];
             addedAt?: number;
+            helloHandledByHost?: boolean;
+            hostMintedClaim?: {
+              code: string;
+              sessionId: string;
+              resumeToken: string;
+            };
           };
           if (parsed.version !== 2 || !parsed.instanceId || !parsed.transport) continue;
           const addedAt = parsed.addedAt ?? 0;
           if (addedAt >= since && (!best || addedAt > best.addedAt)) {
-            best = { instanceId: parsed.instanceId, spec: parsed.transport, addedAt };
+            best = {
+              instanceId: parsed.instanceId,
+              spec: parsed.transport,
+              addedAt,
+              hostMintedClaim:
+                parsed.helloHandledByHost === true && parsed.hostMintedClaim !== undefined
+                  ? parsed.hostMintedClaim
+                  : undefined,
+            };
           }
         } catch {
           // race with deletion; skip
@@ -148,7 +175,12 @@ export async function waitForInstanceFile(
     } catch {
       // dir may not exist yet
     }
-    if (best) return { instanceId: best.instanceId, spec: best.spec };
+    if (best)
+      return {
+        instanceId: best.instanceId,
+        spec: best.spec,
+        ...(best.hostMintedClaim ? { hostMintedClaim: best.hostMintedClaim } : {}),
+      };
     await delay(25);
   }
   throw new Error(
@@ -170,17 +202,38 @@ type ConnectFn<R> = () => Promise<R>;
  */
 export async function dialSdk<R>(
   gateway: {
-    connectToApp: (instanceId: string, spec: InstanceRecord['spec']) => Promise<void>;
+    connectToApp: (
+      instanceId: string,
+      spec: InstanceRecord['spec'],
+      options?: {
+        bindCode?: string;
+        hostMintedSessionId?: string;
+        hostMintedResumeToken?: string;
+      },
+    ) => Promise<void>;
   },
   sandbox: Sandbox,
   connect: ConnectFn<R>,
 ): Promise<R> {
   const startedAt = Date.now();
   const promise = connect();
-  // Attach a catch to suppress unhandled rejection warnings if waitForInstanceFile
-  // throws first (e.g. resume on a dead sandbox).
   promise.catch(() => {});
   const inst = await waitForInstanceFile(sandbox, { since: startedAt });
-  await gateway.connectToApp(inst.instanceId, inst.spec);
+  // When the host wrote a v1.2 `helloHandledByHost` manifest, dial with
+  // the bind subprotocol that authenticates the v3 path. The host has
+  // already minted the claim code and the gateway must reuse the
+  // host-side ids so the SDK's stored sessionId/resumeToken line up.
+  // Hosts that wrote a legacy v1.1 manifest fall through to the
+  // bind-less dial; the gateway's hello handler mints fresh in that
+  // path.
+  if (inst.hostMintedClaim !== undefined) {
+    await gateway.connectToApp(inst.instanceId, inst.spec, {
+      bindCode: inst.hostMintedClaim.code,
+      hostMintedSessionId: inst.hostMintedClaim.sessionId,
+      hostMintedResumeToken: inst.hostMintedClaim.resumeToken,
+    });
+  } else {
+    await gateway.connectToApp(inst.instanceId, inst.spec);
+  }
   return promise;
 }

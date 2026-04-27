@@ -31,3 +31,4 @@ export {
   formatBindSubprotocol,
   parseBindSubprotocol,
 } from './bind-subprotocol.js';
+export { validateAppId } from './app-id.js';

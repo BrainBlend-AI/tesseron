@@ -103,17 +103,17 @@ describe('protocol version handshake', () => {
   it('accepts an exact-version hello', async () => {
     const { forGateway, forSdk } = pair();
     gateway.handleConnection(forGateway);
-    const resp = await sendHello(forSdk, '1.1.0');
+    const resp = await sendHello(forSdk, '1.2.0');
     expect(resp.error).toBeUndefined();
-    expect((resp.result as { protocolVersion: string }).protocolVersion).toBe('1.1.0');
+    expect((resp.result as { protocolVersion: string }).protocolVersion).toBe('1.2.0');
   });
 
-  it('accepts a minor-mismatch hello (1.0.x ↔ 1.1.x)', async () => {
+  it('accepts a minor-mismatch hello (1.x ↔ 1.y)', async () => {
     const { forGateway, forSdk } = pair();
     gateway.handleConnection(forGateway);
     const resp = await sendHello(forSdk, '1.0.0');
     expect(resp.error).toBeUndefined();
-    expect((resp.result as { protocolVersion: string }).protocolVersion).toBe('1.1.0');
+    expect((resp.result as { protocolVersion: string }).protocolVersion).toBe('1.2.0');
   });
 
   it('hard-rejects a major-mismatch hello with -32000 ProtocolMismatch', async () => {

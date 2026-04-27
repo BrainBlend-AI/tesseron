@@ -68,14 +68,20 @@ export function parseBindSubprotocol(
       reason: `multiple ${PREFIX}* elements in header; refusing ambiguous bind`,
     };
   }
-  const code = candidates[0]!.slice(PREFIX.length);
-  if (!isWellFormedBindCode(code)) {
+  const raw = candidates[0]!.slice(PREFIX.length);
+  if (!isWellFormedBindCode(raw)) {
     return {
       code: null,
       reason: 'bind code does not match the host-minted claim grammar',
     };
   }
-  return { code };
+  // Canonicalize to upper-case. Host mints are always upper-case
+  // (see `mintClaimCode` — alphabet is `ABCDEFGHJKMNPQRSTUVWXYZ23456789`),
+  // and the host's bind validation is a constant-time byte compare. Without
+  // this canonicalization, a relaxed grammar that accepts both cases would
+  // never actually let a lower-case bind succeed — it would just look
+  // like a malformed-mismatch failure to the operator.
+  return { code: raw.toUpperCase() };
 }
 
 function isWellFormedBindCode(code: string): boolean {

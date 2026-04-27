@@ -28,13 +28,30 @@
     "tesseron"
   ],
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./protocol": "./src/protocol.ts",
-    "./errors": "./src/errors.ts",
-    "./internal": "./src/internal.ts"
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "import": "./dist/protocol.js",
+      "require": "./dist/protocol.cjs"
+    },
+    "./errors": {
+      "types": "./src/errors.ts",
+      "import": "./dist/errors.js",
+      "require": "./dist/errors.cjs"
+    },
+    "./internal": {
+      "types": "./src/internal.ts",
+      "import": "./dist/internal.js",
+      "require": "./dist/internal.cjs"
+    }
   },
   "files": ["dist", "README.md", "LICENSE"],
   "sideEffects": false,

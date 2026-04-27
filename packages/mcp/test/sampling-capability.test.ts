@@ -38,10 +38,18 @@ async function connectSdkAndClaim(sdk: ServerTesseronClient): Promise<string> {
   const startedAt = Date.now();
   const connectPromise = sdk.connect();
   const inst = await waitForInstanceFile(sandbox, { since: startedAt - 50 });
-  await gateway.connectToApp(inst.instanceId, inst.spec);
+  if (inst.hostMintedClaim !== undefined) {
+    await gateway.connectToApp(inst.instanceId, inst.spec, {
+      bindCode: inst.hostMintedClaim.code,
+      hostMintedSessionId: inst.hostMintedClaim.sessionId,
+      hostMintedResumeToken: inst.hostMintedClaim.resumeToken,
+    });
+  } else {
+    await gateway.connectToApp(inst.instanceId, inst.spec);
+  }
   const welcome = await connectPromise;
   const code = welcome.claimCode;
-  if (!code) throw new Error('gateway did not return a claim code');
+  if (!code) throw new Error('host did not return a claim code');
   await client.request(
     {
       method: 'tools/call',
@@ -49,6 +57,20 @@ async function connectSdkAndClaim(sdk: ServerTesseronClient): Promise<string> {
     },
     CallToolResultSchema,
   );
+  // Wait for the gateway's `tesseron/claimed` notification to have
+  // been processed by the SDK's welcome listener so subsequent reads
+  // of `getWelcome().agent` / `.capabilities` reflect the claimed
+  // values rather than the synthesized pre-claim sentinel.
+  await new Promise<void>((resolve) => {
+    if (sdk.getWelcome()?.agent.id !== 'pending') {
+      resolve();
+      return;
+    }
+    const off = sdk.onWelcomeChange(() => {
+      off();
+      resolve();
+    });
+  });
   return code;
 }
 

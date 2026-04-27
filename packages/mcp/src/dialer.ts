@@ -154,14 +154,28 @@ export class WsDialer implements GatewayDialer<'ws'> {
 export class UdsDialer implements GatewayDialer<'uds'> {
   readonly kind = 'uds' as const;
 
-  dial(spec: { kind: 'uds'; path: string }, _options: DialerOptions = {}): DialedTransport {
-    // UDS path doesn't carry the bind subprotocol — the file-mode-based
-    // UID enforcement on the socket inode is the access gate. Host-mint
-    // claim flow on UDS is tracked separately as a follow-up to #60.
+  dial(spec: { kind: 'uds'; path: string }, options: DialerOptions = {}): DialedTransport {
+    // UDS doesn't have a WS subprotocol — the equivalent for the v3
+    // host-mint flow is sending `tesseron/bind { code }` as the very
+    // first NDJSON frame after connect, before any other traffic. The
+    // host validates the code against its in-memory `hostMintedClaim`
+    // in constant time and replies success or closes the channel. The
+    // file-mode-based UID enforcement on the socket inode is still the
+    // first gate; bind is the second (matching the WS path's two-gate
+    // model: same-user UID + bind subprotocol). See tesseron#60.
     const socket = netConnect({ path: spec.path });
 
     const messageHandlers: Array<(message: unknown) => void> = [];
     const closeHandlers: Array<(reason?: string) => void> = [];
+
+    // Bind handshake state. While `bindResponseId` is set, incoming
+    // frames are filtered for the matching response and not forwarded
+    // to messageHandlers (the gateway hasn't registered them yet
+    // anyway, but the dispatcher's contract is "no spurious frames"
+    // so we keep the channel quiet pre-bind).
+    let bindResponseId: string | undefined;
+    let bindResolve: (() => void) | undefined;
+    let bindReject: ((err: Error) => void) | undefined;
 
     let buffer = '';
     socket.setEncoding('utf-8');
@@ -175,15 +189,47 @@ export class UdsDialer implements GatewayDialer<'uds'> {
           let parsed: unknown;
           try {
             parsed = JSON.parse(line);
-            for (const h of messageHandlers) h(parsed);
           } catch {
-            // skip malformed line
+            newlineIndex = buffer.indexOf('\n');
+            continue;
+          }
+          if (
+            bindResponseId !== undefined &&
+            typeof parsed === 'object' &&
+            parsed !== null &&
+            (parsed as { id?: unknown }).id === bindResponseId
+          ) {
+            const msg = parsed as {
+              id: string;
+              result?: unknown;
+              error?: { code?: number; message?: string };
+            };
+            const resolveFn = bindResolve;
+            const rejectFn = bindReject;
+            bindResponseId = undefined;
+            bindResolve = undefined;
+            bindReject = undefined;
+            if (msg.error !== undefined) {
+              const reason = msg.error.message ?? `code ${msg.error.code ?? '<unknown>'}`;
+              rejectFn?.(new Error(`tesseron/bind rejected: ${reason}`));
+            } else {
+              resolveFn?.();
+            }
+          } else {
+            for (const h of messageHandlers) h(parsed);
           }
         }
         newlineIndex = buffer.indexOf('\n');
       }
     });
     socket.on('close', () => {
+      if (bindReject !== undefined) {
+        const rejectFn = bindReject;
+        bindResolve = undefined;
+        bindReject = undefined;
+        bindResponseId = undefined;
+        rejectFn(new Error('UDS closed before tesseron/bind completed'));
+      }
       for (const h of closeHandlers) h();
     });
     socket.on('error', () => {
@@ -191,7 +237,31 @@ export class UdsDialer implements GatewayDialer<'uds'> {
     });
 
     const opened = new Promise<void>((resolve, reject) => {
-      socket.once('connect', () => resolve());
+      socket.once('connect', () => {
+        if (options.bindCode === undefined) {
+          resolve();
+          return;
+        }
+        const id = `__tesseron-bind-${globalThis.crypto.randomUUID()}`;
+        bindResponseId = id;
+        bindResolve = resolve;
+        bindReject = reject;
+        try {
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: '2.0',
+              id,
+              method: 'tesseron/bind',
+              params: { code: options.bindCode },
+            })}\n`,
+          );
+        } catch (err) {
+          bindResponseId = undefined;
+          bindResolve = undefined;
+          bindReject = undefined;
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
       socket.once('error', (err: Error) =>
         reject(new Error(`Failed to connect to ${spec.path}: ${err.message}`)),
       );

@@ -14,6 +14,12 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
-  splitting: false,
+  // splitting=true lets tsup deduplicate code shared between entries
+  // (e.g. TesseronError is reachable from both `index` and `internal`).
+  // Without it the dispatcher in `internal.cjs` and TesseronError in
+  // `index.cjs` end up as separate class definitions, and `instanceof`
+  // checks across them silently fail. The duplication is a tsup default
+  // for multi-entry CJS — splitting at least handles ESM correctly.
+  splitting: true,
   treeshake: true,
 });

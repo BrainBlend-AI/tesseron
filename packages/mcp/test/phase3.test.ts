@@ -96,6 +96,22 @@ async function setupAndClaim(
     { method: 'tools/call', params: { name: 'tesseron__claim_session', arguments: { code } } },
     CallToolResultSchema,
   );
+  // Wait for the gateway's `tesseron/claimed` notification to propagate
+  // into the SDK's welcome listener so subsequent action invocations
+  // observe the gateway's authoritative `agentCapabilities` rather than
+  // the synthesized pre-claim defaults (sampling: false, elicitation:
+  // false). Without this, handlers that call ctx.sample / ctx.elicit
+  // see the wrong capability bits and fail before the wire round-trip.
+  await new Promise<void>((resolve) => {
+    if (sdk.getWelcome()?.agent.id !== 'pending') {
+      resolve();
+      return;
+    }
+    const off = sdk.onWelcomeChange(() => {
+      off();
+      resolve();
+    });
+  });
   return { sdk, claimCode: code };
 }
 

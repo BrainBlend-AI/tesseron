@@ -18833,8 +18833,8 @@ var import_promises2 = require("fs/promises");
 var import_node_os = require("os");
 var import_node_path2 = require("path");
 
-// ../core/src/protocol.ts
-var PROTOCOL_VERSION = "1.1.0";
+// ../core/dist/chunk-4YO6JR4M.js
+var PROTOCOL_VERSION = "1.2.0";
 var JSONRPC_VERSION2 = "2.0";
 var TesseronErrorCode = {
   ParseError: -32700,
@@ -18856,7 +18856,7 @@ var TesseronErrorCode = {
   ResumeFailed: -32011
 };
 
-// ../core/src/errors.ts
+// ../core/dist/chunk-XGJKNUCM.js
 var TesseronError = class extends Error {
   /** Numeric error code from {@link TesseronErrorCode}. */
   code;
@@ -18901,7 +18901,7 @@ var ElicitationNotAvailableError = class extends TesseronError {
   }
 };
 
-// ../core/src/transport.ts
+// ../core/dist/chunk-TG667TYA.js
 var TransportClosedError = class extends TesseronError {
   constructor(reason) {
     super(
@@ -18911,8 +18911,6 @@ var TransportClosedError = class extends TesseronError {
     this.name = "TransportClosedError";
   }
 };
-
-// ../core/src/schema-helpers.ts
 function assertValidElicitSchema(schema) {
   if (!schema || typeof schema !== "object") {
     throw new TesseronError(
@@ -18951,8 +18949,6 @@ function assertValidElicitSchema(schema) {
   }
   return schema;
 }
-
-// ../core/src/dispatcher.ts
 var JsonRpcDispatcher = class {
   constructor(send) {
     this.send = send;
@@ -19087,7 +19083,7 @@ function toErrorPayload(error2) {
   return { code: TesseronErrorCode.InternalError, message: String(error2) };
 }
 
-// ../core/src/timing-safe.ts
+// ../core/dist/internal.js
 function constantTimeEqual(a, b) {
   if (typeof a !== "string" || typeof b !== "string") {
     throw new TypeError("constantTimeEqual requires two string arguments");
@@ -19099,8 +19095,6 @@ function constantTimeEqual(a, b) {
   }
   return mismatch === 0;
 }
-
-// ../core/src/bind-subprotocol.ts
 var PREFIX = "tesseron-bind.";
 function formatBindSubprotocol(code) {
   if (!isWellFormedBindCode(code)) {
@@ -19122,6 +19116,16 @@ function isWellFormedBindCode(code) {
     if (!(isUpper || isLower || isDigit || isDash || isUnderscore)) return false;
   }
   return true;
+}
+var RESERVED_APP_IDS = /* @__PURE__ */ new Set(["tesseron", "mcp", "system"]);
+var APP_ID_RE = /^[a-z][a-z0-9_]*$/;
+function validateAppId(id) {
+  if (!APP_ID_RE.test(id)) {
+    throw new Error(`Invalid app id "${id}". Must match /^[a-z][a-z0-9_]*$/.`);
+  }
+  if (RESERVED_APP_IDS.has(id)) {
+    throw new Error(`App id "${id}" is reserved. Choose a different identifier.`);
+  }
 }
 
 // src/dialer.ts
@@ -19200,10 +19204,13 @@ var WsDialer = class {
 };
 var UdsDialer = class {
   kind = "uds";
-  dial(spec, _options = {}) {
+  dial(spec, options = {}) {
     const socket = (0, import_node_net.connect)({ path: spec.path });
     const messageHandlers = [];
     const closeHandlers = [];
+    let bindResponseId;
+    let bindResolve;
+    let bindReject;
     let buffer = "";
     socket.setEncoding("utf-8");
     socket.on("data", (chunk) => {
@@ -19216,20 +19223,69 @@ var UdsDialer = class {
           let parsed;
           try {
             parsed = JSON.parse(line);
-            for (const h of messageHandlers) h(parsed);
           } catch {
+            newlineIndex = buffer.indexOf("\n");
+            continue;
+          }
+          if (bindResponseId !== void 0 && typeof parsed === "object" && parsed !== null && parsed.id === bindResponseId) {
+            const msg = parsed;
+            const resolveFn = bindResolve;
+            const rejectFn = bindReject;
+            bindResponseId = void 0;
+            bindResolve = void 0;
+            bindReject = void 0;
+            if (msg.error !== void 0) {
+              const reason = msg.error.message ?? `code ${msg.error.code ?? "<unknown>"}`;
+              rejectFn?.(new Error(`tesseron/bind rejected: ${reason}`));
+            } else {
+              resolveFn?.();
+            }
+          } else {
+            for (const h of messageHandlers) h(parsed);
           }
         }
         newlineIndex = buffer.indexOf("\n");
       }
     });
     socket.on("close", () => {
+      if (bindReject !== void 0) {
+        const rejectFn = bindReject;
+        bindResolve = void 0;
+        bindReject = void 0;
+        bindResponseId = void 0;
+        rejectFn(new Error("UDS closed before tesseron/bind completed"));
+      }
       for (const h of closeHandlers) h();
     });
     socket.on("error", () => {
     });
     const opened = new Promise((resolve, reject) => {
-      socket.once("connect", () => resolve());
+      socket.once("connect", () => {
+        if (options.bindCode === void 0) {
+          resolve();
+          return;
+        }
+        const id = `__tesseron-bind-${globalThis.crypto.randomUUID()}`;
+        bindResponseId = id;
+        bindResolve = resolve;
+        bindReject = reject;
+        try {
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              method: "tesseron/bind",
+              params: { code: options.bindCode }
+            })}
+`
+          );
+        } catch (err) {
+          bindResponseId = void 0;
+          bindResolve = void 0;
+          bindReject = void 0;
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
       socket.once(
         "error",
         (err) => reject(new Error(`Failed to connect to ${spec.path}: ${err.message}`))
@@ -19381,16 +19437,6 @@ function generateResumeToken() {
   const buf = new Uint8Array(24);
   globalThis.crypto.getRandomValues(buf);
   return import_node_buffer2.Buffer.from(buf).toString("base64url");
-}
-var RESERVED_APP_IDS = /* @__PURE__ */ new Set(["tesseron", "mcp", "system"]);
-var APP_ID_RE = /^[a-z][a-z0-9_]*$/;
-function validateAppId(id) {
-  if (!APP_ID_RE.test(id)) {
-    throw new Error(`Invalid app id "${id}". Must match /^[a-z][a-z0-9_]*$/.`);
-  }
-  if (RESERVED_APP_IDS.has(id)) {
-    throw new Error(`App id "${id}" is reserved. Choose a different identifier.`);
-  }
 }
 
 // src/gateway.ts
@@ -19768,6 +19814,11 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    */
   async claimSession(claimCode) {
     const upper = claimCode.toUpperCase();
+    for (const session of this.sessions.values()) {
+      if (session.claimed && session.claimCode.toUpperCase() === upper) {
+        return session;
+      }
+    }
     const sessionId = this.pendingClaims.get(upper);
     if (sessionId !== void 0) {
       const session = this.sessions.get(sessionId);
@@ -19797,9 +19848,14 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       this.emit("sessions-changed");
       return session;
     }
+    const now = Date.now();
     for (const [instanceId, manifest] of this.hostMintedInstances) {
       const minted = manifest.hostMintedClaim;
       if (!minted || minted.code.toUpperCase() !== upper) continue;
+      if (minted.expiresAt !== void 0 && minted.expiresAt < now) {
+        this.hostMintedInstances.delete(instanceId);
+        continue;
+      }
       if (this.hostMintedClaimResolvers.has(instanceId)) {
         this.emitDiscoveryLog({
           level: "warning",
