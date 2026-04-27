@@ -27,7 +27,8 @@
     "tesseron"
   ],
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./src/index.ts",
   "files": ["dist", "README.md", "LICENSE"],
   "sideEffects": false,

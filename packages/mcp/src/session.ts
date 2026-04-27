@@ -119,14 +119,4 @@ export function generateResumeToken(): string {
   return Buffer.from(buf).toString('base64url');
 }
 
-const RESERVED_APP_IDS = new Set(['tesseron', 'mcp', 'system']);
-const APP_ID_RE = /^[a-z][a-z0-9_]*$/;
-
-export function validateAppId(id: string): void {
-  if (!APP_ID_RE.test(id)) {
-    throw new Error(`Invalid app id "${id}". Must match /^[a-z][a-z0-9_]*$/.`);
-  }
-  if (RESERVED_APP_IDS.has(id)) {
-    throw new Error(`App id "${id}" is reserved. Choose a different identifier.`);
-  }
-}
+export { validateAppId } from '@tesseron/core/internal';

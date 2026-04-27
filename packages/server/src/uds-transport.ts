@@ -3,32 +3,37 @@ import { chmod, mkdtemp, rm, unlink } from 'node:fs/promises';
 import { type Server, type Socket, createServer } from 'node:net';
 import { homedir, platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Transport } from '@tesseron/core';
+import type { AgentIdentity, HelloParams, Transport, WelcomeResult } from '@tesseron/core';
+import { PROTOCOL_VERSION } from '@tesseron/core';
+import { constantTimeEqual } from '@tesseron/core/internal';
+import { mintClaimCode, mintResumeToken, mintSessionId } from './claim-mint.js';
 import { writePrivateFile } from './fs-hygiene.js';
 
 const isWindows = platform() === 'win32';
+const HOST_MINT_TTL_MS = 10 * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+const BIND_FAILURE_THRESHOLD = 5;
+const BIND_FAILURE_WINDOW_MS = 60_000;
+const BIND_FAILURE_LOCKOUT_MS = 60_000;
 
-/**
- * Resolves the instance-discovery directory on every call rather than at
- * module load. Tests (and long-lived processes that change `$HOME` at runtime)
- * need this — capturing at load time meant a sandbox set via
- * `process.env.HOME` before `beforeAll` was ignored.
- */
 function getInstancesDir(): string {
   return join(homedir(), '.tesseron', 'instances');
 }
 
 function generateInstanceId(): string {
-  // CSPRNG-sourced like the rest of `~/.tesseron/*` writes. Instance IDs
-  // aren't bearer tokens (the gateway still requires the standard
-  // handshake), but a predictable id is a side channel — a sibling
-  // process that observes one id can narrow the manifest namespace
-  // for the next, and the consistency with claim/session/resume token
-  // generation matters for review.
   const buf = new Uint8Array(4);
   globalThis.crypto.getRandomValues(buf);
   const rand = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
   return `inst-${Date.now().toString(36)}-${rand}`;
+}
+
+interface HostMintedClaim {
+  code: string;
+  sessionId: string;
+  resumeToken: string;
+  mintedAt: number;
+  expiresAt: number;
+  boundAgent: AgentIdentity | null;
 }
 
 export interface UnixSocketServerTransportOptions {
@@ -44,28 +49,21 @@ export interface UnixSocketServerTransportOptions {
 }
 
 /**
- * Transport that hosts a one-shot Unix domain socket and announces itself to
- * the Tesseron gateway by writing `~/.tesseron/instances/<instanceId>.json`
- * with a `{ kind: 'uds', path }` spec. The gateway watches that directory,
- * connects to the advertised path, and the two ends exchange newline-delimited
- * JSON-RPC messages.
+ * Host-side UDS transport with the v3 host-mint claim flow (tesseron#60).
  *
- * **Framing.** NDJSON: `JSON.stringify(msg) + '\n'` per outbound message; line
- * splitter on inbound. `JSON.stringify` never emits raw `\n` (newlines inside
- * strings are escaped as `\\n`), so the framing is lossless.
+ * Mints `claimCode` / `sessionId` / `resumeToken` at construction; writes
+ * them into the manifest's `hostMintedClaim`; intercepts the SDK's
+ * `tesseron/hello` and synthesizes a welcome locally. When the gateway
+ * dials and sends `tesseron/bind { code }` as the first NDJSON frame,
+ * this transport validates against its in-memory mint constant-time and
+ * either accepts (proceeding with the v3 hello-replay) or rejects with
+ * an `Unauthorized` error and closes. v1.1 gateways that don't send a
+ * bind frame take the legacy queue-drain path; the gateway mints its
+ * own claim code in that path.
  *
- * **Access control.** On Linux/macOS the socket file lives inside a temp dir
- * created with mode 0700, so only the owning UID can `connect()`. The gateway
- * dialer relies on this — there's no claim-code-level handshake before bytes
- * flow. Threat model matches loopback WS + claim code.
- *
- * **Windows.** AF_UNIX is supported on Windows ≥ 1803 but file-mode-based UID
- * enforcement is not. Same-UID enforcement on Windows is the responsibility
- * of the OS-level user separation; treat the binding as "any process the
- * current user can spawn" there. Document explicitly in the binding spec.
- *
- * Accepts exactly one connection — the first peer wins, subsequent connect
- * attempts close immediately.
+ * **Access control.** The kernel's same-UID enforcement on the socket
+ * inode (mode 0600 in a 0700 directory) is the first gate; the bind
+ * handshake is the second. Same two-gate model as the WS path.
  */
 export class UnixSocketServerTransport implements Transport {
   private readonly messageHandlers: Array<(message: unknown) => void> = [];
@@ -73,20 +71,34 @@ export class UnixSocketServerTransport implements Transport {
   private readonly opened: Promise<void>;
   private readonly instanceId: string;
   private readonly options: UnixSocketServerTransportOptions;
+  private readonly hostMintedClaim: HostMintedClaim;
   private server?: Server;
   private socket?: Socket;
   private socketPath?: string;
-  /** Temp dir created by us; deleted on close. Undefined when caller supplied `options.path`. */
   private tempDir?: string;
   private manifestFile?: string;
-  /** Messages queued before the gateway dials in. Drained on connection. */
   private readonly sendQueue: string[] = [];
-  /** Inbound NDJSON splitter buffer. */
   private buffer = '';
+  private boundViaHandshake = false;
+  private cachedHello?: { id: unknown; params: HelloParams };
+  private helloAnswered = false;
+  private helloReplayId?: string;
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private readonly bindFailureTimes: number[] = [];
+  private bindLockoutUntil = 0;
 
   constructor(options: UnixSocketServerTransportOptions = {}) {
     this.options = options;
     this.instanceId = generateInstanceId();
+    const now = Date.now();
+    this.hostMintedClaim = {
+      code: mintClaimCode(),
+      sessionId: mintSessionId(),
+      resumeToken: mintResumeToken(),
+      mintedAt: now,
+      expiresAt: now + HOST_MINT_TTL_MS,
+      boundAgent: null,
+    };
     this.opened = this.listen();
   }
 
@@ -105,9 +117,6 @@ export class UnixSocketServerTransport implements Transport {
       });
     });
 
-    // Tighten the socket-file mode where the OS honours it. On Windows AF_UNIX
-    // sockets ignore POSIX mode bits, so this is a no-op there — the parent
-    // dir's mode is also a no-op. Documented as a known limitation.
     if (!isWindows) {
       try {
         await chmod(socketPath, 0o600);
@@ -117,18 +126,11 @@ export class UnixSocketServerTransport implements Transport {
     }
 
     await this.writeManifest(socketPath);
+    this.startHeartbeat(socketPath);
   }
 
-  /**
-   * Resolve the socket path. When the caller supplies `options.path` we use
-   * it verbatim. Otherwise we create a 0700 temp dir and bind `sock` inside,
-   * so file-mode-based UID enforcement guards the inode without depending on
-   * the global `os.tmpdir()` permissions (which on Linux are typically 1777).
-   */
   private async resolveSocketPath(): Promise<string> {
     if (this.options.path) {
-      // Make sure stale leftover from a prior run with the same path doesn't
-      // collide with bind. UDS bind() fails with EADDRINUSE on existing files.
       if (existsSync(this.options.path)) {
         try {
           await unlink(this.options.path);
@@ -138,7 +140,6 @@ export class UnixSocketServerTransport implements Transport {
       }
       return this.options.path;
     }
-    // mkdtemp respects the process umask; explicit chmod after for determinism.
     const dir = await mkdtemp(join(tmpdir(), 'tesseron-'));
     this.tempDir = dir;
     if (!isWindows) {
@@ -153,7 +154,6 @@ export class UnixSocketServerTransport implements Transport {
 
   private attachGateway(socket: Socket): void {
     if (this.socket) {
-      // Already bound to a gateway; reject duplicates by ending immediately.
       socket.end();
       socket.destroy();
       return;
@@ -161,38 +161,220 @@ export class UnixSocketServerTransport implements Transport {
     this.socket = socket;
     socket.setEncoding('utf-8');
 
-    // Drain anything the caller tried to send before the gateway showed up.
-    for (const msg of this.sendQueue) {
-      socket.write(`${msg}\n`);
-    }
-    this.sendQueue.length = 0;
-
-    socket.on('data', (chunk: string) => {
-      this.buffer += chunk;
-      let idx = this.buffer.indexOf('\n');
-      while (idx !== -1) {
-        const line = this.buffer.slice(0, idx);
-        this.buffer = this.buffer.slice(idx + 1);
-        if (line.length > 0) {
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(line);
-            for (const handler of this.messageHandlers) handler(parsed);
-          } catch {
-            // skip malformed line
-          }
-        }
-        idx = this.buffer.indexOf('\n');
-      }
-    });
-
+    socket.on('data', (chunk: string) => this.onData(chunk));
     socket.on('close', () => {
       for (const handler of this.closeHandlers) handler();
     });
-
     socket.on('error', () => {
       // 'close' fires after 'error'; let onClose drive teardown
     });
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk;
+    let idx = this.buffer.indexOf('\n');
+    while (idx !== -1) {
+      const line = this.buffer.slice(0, idx);
+      this.buffer = this.buffer.slice(idx + 1);
+      if (line.length > 0) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          idx = this.buffer.indexOf('\n');
+          continue;
+        }
+        this.routeFrame(parsed);
+      }
+      idx = this.buffer.indexOf('\n');
+    }
+  }
+
+  /**
+   * Route an inbound frame from the gateway. The first frame may be a
+   * `tesseron/bind` request — this transport handles it specially:
+   * validates the code constant-time, responds, sets the bound flag,
+   * and (on success) synthesizes a welcome to the SDK + replays the
+   * cached hello to the gateway.
+   *
+   * Drops the gateway's reply to the replayed hello (id-matched) so the
+   * SDK doesn't see a second welcome. All other frames forward to the
+   * registered messageHandlers.
+   */
+  private routeFrame(parsed: unknown): void {
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as { method?: unknown }).method === 'tesseron/bind'
+    ) {
+      this.handleBindRequest(
+        parsed as { id: string | number | null; method: string; params: { code: string } },
+      );
+      return;
+    }
+    if (
+      this.boundViaHandshake &&
+      this.helloReplayId !== undefined &&
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as { id?: unknown }).id === this.helloReplayId
+    ) {
+      const result = (parsed as { result?: { agent?: AgentIdentity } }).result;
+      if (result?.agent !== undefined) {
+        this.hostMintedClaim.boundAgent = result.agent;
+      }
+      this.helloReplayId = undefined;
+      return;
+    }
+    for (const handler of this.messageHandlers) handler(parsed);
+  }
+
+  private handleBindRequest(req: {
+    id: string | number | null;
+    method: string;
+    params: { code: string };
+  }): void {
+    const now = Date.now();
+    if (now < this.bindLockoutUntil) {
+      this.respondBindError(req.id, -32009, 'rate-limit lockout');
+      this.socket?.end();
+      this.socket?.destroy();
+      return;
+    }
+    if (this.boundViaHandshake) {
+      this.respondBindError(req.id, -32009, 'already bound');
+      return;
+    }
+    if (this.hostMintedClaim.boundAgent !== null) {
+      this.respondBindError(req.id, -32009, 'claim already spent');
+      return;
+    }
+    if (typeof req.params?.code !== 'string') {
+      this.respondBindError(req.id, -32602, 'bind requires `code` string param');
+      return;
+    }
+    if (!constantTimeEqual(req.params.code, this.hostMintedClaim.code)) {
+      this.recordBindFailure(now);
+      this.respondBindError(req.id, -32009, 'bind code mismatch');
+      this.socket?.end();
+      this.socket?.destroy();
+      return;
+    }
+    this.bindFailureTimes.length = 0;
+    this.boundViaHandshake = true;
+    // Respond first so the gateway's dial promise resolves before any
+    // hello-replay traffic.
+    const ok = `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: req.id,
+      result: { ok: true },
+    })}\n`;
+    try {
+      this.socket?.write(ok);
+    } catch (err) {
+      process.stderr.write(
+        `[tesseron] UDS bind ack write failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      return;
+    }
+    // SDK hello already received a synthesized welcome via send();
+    // replay just the hello to the gateway here. If the SDK hasn't
+    // sent hello yet, send() will fire the replay when it does.
+    if (this.cachedHello !== undefined) {
+      this.replayHelloToGateway(this.cachedHello.params);
+    }
+    // Drain any non-hello queued frames to the gateway (post-bind).
+    for (const raw of this.sendQueue) {
+      if (!isHelloFrame(raw)) {
+        try {
+          this.socket?.write(`${raw}\n`);
+        } catch {
+          // best-effort drain
+        }
+      }
+    }
+    this.sendQueue.length = 0;
+  }
+
+  private respondBindError(id: string | number | null, code: number, message: string): void {
+    const frame = `${JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      error: { code, message },
+    })}\n`;
+    try {
+      this.socket?.write(frame);
+    } catch {
+      // socket already in trouble; close handler will clean up
+    }
+  }
+
+  private recordBindFailure(now: number): void {
+    const cutoff = now - BIND_FAILURE_WINDOW_MS;
+    while (this.bindFailureTimes.length > 0 && this.bindFailureTimes[0]! < cutoff) {
+      this.bindFailureTimes.shift();
+    }
+    this.bindFailureTimes.push(now);
+    if (this.bindFailureTimes.length >= BIND_FAILURE_THRESHOLD) {
+      this.bindLockoutUntil = now + BIND_FAILURE_LOCKOUT_MS;
+      this.bindFailureTimes.length = 0;
+      process.stderr.write(
+        `[tesseron] UDS bind rate-limit triggered for instance ${this.instanceId}; locked out for ${BIND_FAILURE_LOCKOUT_MS}ms\n`,
+      );
+    }
+  }
+
+  private deliverSynthesizedWelcome(sdkHelloId: unknown, helloParams: HelloParams): void {
+    const synthesized: WelcomeResult = {
+      sessionId: this.hostMintedClaim.sessionId,
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {
+        streaming: true,
+        subscriptions: true,
+        sampling: false,
+        elicitation: false,
+      },
+      agent: { id: 'pending', name: 'Awaiting agent' },
+      claimCode: this.hostMintedClaim.code,
+      resumeToken: this.hostMintedClaim.resumeToken,
+    };
+    void helloParams;
+    const response = {
+      jsonrpc: '2.0' as const,
+      id: sdkHelloId as string | number | null,
+      result: synthesized,
+    };
+    for (const handler of this.messageHandlers) handler(response);
+    this.helloAnswered = true;
+  }
+
+  private replayHelloToGateway(helloParams: HelloParams): void {
+    if (!this.socket || this.socket.destroyed) return;
+    this.helloReplayId = `__tesseron-uds-replay-${globalThis.crypto.randomUUID()}`;
+    const replay = `${JSON.stringify({
+      jsonrpc: '2.0' as const,
+      id: this.helloReplayId,
+      method: 'tesseron/hello',
+      params: helloParams,
+    })}\n`;
+    this.socket.write(replay);
+  }
+
+  private startHeartbeat(socketPath: string): void {
+    this.heartbeatTimer = setInterval(() => {
+      if (this.hostMintedClaim.boundAgent !== null) {
+        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = undefined;
+        return;
+      }
+      const now = Date.now();
+      this.hostMintedClaim.mintedAt = now;
+      this.hostMintedClaim.expiresAt = now + HOST_MINT_TTL_MS;
+      this.writeManifest(socketPath).catch((err: Error) =>
+        process.stderr.write(`[tesseron] UDS heartbeat manifest write failed: ${err.message}\n`),
+      );
+    }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref?.();
   }
 
   private async writeManifest(socketPath: string): Promise<void> {
@@ -205,11 +387,10 @@ export class UnixSocketServerTransport implements Transport {
           instanceId: this.instanceId,
           appName: this.options.appName ?? 'node',
           addedAt: Date.now(),
-          // Stamp the Node app's pid so a gateway can probe liveness with
-          // `process.kill(pid, 0)` and tombstone manifests whose owning
-          // process died without unlinking the socket file. See tesseron#53.
           pid: process.pid,
           transport: { kind: 'uds', path: socketPath },
+          helloHandledByHost: true,
+          hostMintedClaim: { ...this.hostMintedClaim },
         },
         null,
         2,
@@ -217,12 +398,30 @@ export class UnixSocketServerTransport implements Transport {
     );
   }
 
-  /** Resolves once the UDS server is listening and the manifest has been written. */
   async ready(): Promise<void> {
     await this.opened;
   }
 
   send(message: unknown): void {
+    // Synthesize the welcome immediately on SDK hello so the SDK can
+    // surface the host-minted claim code without waiting for a gateway.
+    // If a gateway has already completed the bind handshake, replay
+    // the hello straight away; otherwise the bind handler does the
+    // replay when it succeeds.
+    if (
+      !this.helloAnswered &&
+      typeof message === 'object' &&
+      message !== null &&
+      (message as { method?: unknown }).method === 'tesseron/hello'
+    ) {
+      const m = message as { id?: unknown; method: 'tesseron/hello'; params: HelloParams };
+      this.cachedHello = { id: m.id, params: m.params };
+      this.deliverSynthesizedWelcome(m.id, m.params);
+      if (this.boundViaHandshake && this.socket && !this.socket.destroyed) {
+        this.replayHelloToGateway(m.params);
+      }
+      return;
+    }
     const raw = JSON.stringify(message);
     if (this.socket && !this.socket.destroyed) {
       this.socket.write(`${raw}\n`);
@@ -240,6 +439,10 @@ export class UnixSocketServerTransport implements Transport {
   }
 
   close(_reason?: string): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
     if (this.manifestFile && existsSync(this.manifestFile)) {
       unlink(this.manifestFile).catch(() => {});
     }
@@ -252,5 +455,14 @@ export class UnixSocketServerTransport implements Transport {
     if (this.tempDir) {
       rm(this.tempDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+}
+
+function isHelloFrame(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw) as { method?: unknown };
+    return parsed.method === 'tesseron/hello';
+  } catch {
+    return false;
   }
 }

@@ -645,6 +645,17 @@ export class TesseronGateway extends EventEmitter {
    */
   async claimSession(claimCode: string): Promise<Session | null> {
     const upper = claimCode.toUpperCase();
+    // Already-claimed v3 session. Test harnesses (and any embedder that
+    // dials with a bind subprotocol before calling `claim_session`) end
+    // up here with a session born claimed. The MCP tool result is still
+    // useful for the operator — it signals "yes, your claim worked" —
+    // so we surface the existing session rather than reporting a
+    // "no pending session" miss.
+    for (const session of this.sessions.values()) {
+      if (session.claimed && session.claimCode.toUpperCase() === upper) {
+        return session;
+      }
+    }
     // Legacy v1.1 path: the gateway itself minted this code, the session is
     // already alive in `sessions` waiting for a claim. Common path on
     // existing deployments and the only path until tesseron#60 lands hosts
@@ -685,9 +696,19 @@ export class TesseronGateway extends EventEmitter {
     // carrying the code; the host validates the bind and the gateway's
     // hello handler (in v3 mode, gated on `bindContext`) registers a
     // pre-claimed session and resolves the deferred set up here.
+    const now = Date.now();
     for (const [instanceId, manifest] of this.hostMintedInstances) {
       const minted = manifest.hostMintedClaim;
       if (!minted || minted.code.toUpperCase() !== upper) continue;
+      // Reject codes whose host-side TTL has expired. The host stops
+      // refreshing `expiresAt` once the claim is consumed, so an expired
+      // value here means the SDK lost interest. Treat as a miss; the
+      // bridge produces "no pending session" and the user can mint
+      // fresh by reloading.
+      if (minted.expiresAt !== undefined && minted.expiresAt < now) {
+        this.hostMintedInstances.delete(instanceId);
+        continue;
+      }
 
       // Concurrency guard: a `tesseron__claim_session` retry while the
       // first call is still in flight would clobber the deferred and

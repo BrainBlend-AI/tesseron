@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentIdentity, HelloParams, WelcomeResult } from '@tesseron/core';
 import { PROTOCOL_VERSION } from '@tesseron/core';
-import { constantTimeEqual, parseBindSubprotocol } from '@tesseron/core/internal';
+import { constantTimeEqual, parseBindSubprotocol, validateAppId } from '@tesseron/core/internal';
 import type { Plugin, ViteDevServer } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 import { mintClaimCode, mintResumeToken, mintSessionId } from './claim-mint.js';
@@ -31,8 +31,21 @@ interface HostMintedClaim {
   sessionId: string;
   resumeToken: string;
   mintedAt: number;
+  /** Sliding TTL deadline; gateway skips manifests past this time. */
+  expiresAt: number;
   boundAgent: AgentIdentity | null;
 }
+
+/** Default sliding TTL on a host-minted claim — 10 minutes from `mintedAt`. */
+const HOST_MINT_TTL_MS = 10 * 60 * 1000;
+/** How often the plugin rewrites the manifest with a fresh `mintedAt` / `expiresAt`. */
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+/** Bind-mismatch failures inside the rolling window before lock-out. */
+const BIND_FAILURE_THRESHOLD = 5;
+/** Rolling window for failure counting (ms). */
+const BIND_FAILURE_WINDOW_MS = 60_000;
+/** Lock-out duration once the threshold is crossed (ms). */
+const BIND_FAILURE_LOCKOUT_MS = 60_000;
 
 interface PendingInstance {
   instanceId: string;
@@ -65,6 +78,21 @@ interface PendingInstance {
    * the plugin's synthesized welcome).
    */
   helloReplayId?: string;
+  /** Bind-failure timestamps for the rate limit's rolling window. */
+  bindFailureTimes: number[];
+  /** Lock-out deadline (ms epoch) when set; until then bind upgrades get HTTP 429. */
+  bindLockoutUntil: number;
+  /** Heartbeat timer rewriting the manifest every {@link HEARTBEAT_INTERVAL_MS}. */
+  heartbeatTimer?: ReturnType<typeof setInterval>;
+  /**
+   * Cached SDK `tesseron/hello` frame. The plugin answers hello
+   * immediately on arrival (so the SDK can show the host-minted claim
+   * code straight away) and replays the cached frame to the gateway
+   * once a v1.2 dial with the bind subprotocol completes.
+   */
+  cachedHello?: { id: unknown; params: unknown };
+  /** True after the plugin has synthesized and sent the welcome to the SDK. */
+  helloAnswered: boolean;
 }
 
 const WS_PATH_PREFIX = '/@tesseron/ws';
@@ -247,11 +275,13 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
             // plugin doesn't know yet whether the upcoming gateway dial
             // will speak v1.2. The v1.1 path simply ignores the host-mint
             // values and lets the gateway mint its own. See tesseron#60.
+            const mintedAt = Date.now();
             const hostMintedClaim: HostMintedClaim = {
               code: mintClaimCode(),
               sessionId: mintSessionId(),
               resumeToken: mintResumeToken(),
-              mintedAt: Date.now(),
+              mintedAt,
+              expiresAt: mintedAt + HOST_MINT_TTL_MS,
               boundAgent: null,
             };
             const entry: PendingInstance = {
@@ -262,6 +292,9 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
               queue: [],
               hostMintedClaim,
               boundViaSubprotocol: false,
+              bindFailureTimes: [],
+              bindLockoutUntil: 0,
+              helloAnswered: false,
             };
             instances.set(instanceId, entry);
 
@@ -271,6 +304,27 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
               ),
             );
 
+            // Heartbeat: refresh expiresAt every half-TTL while the
+            // SDK is alive and unbound. Stops once boundAgent !== null
+            // (claim consumed) or the entry is removed (browser closed).
+            const heartbeat = setInterval(() => {
+              if (!instances.has(instanceId) || entry.hostMintedClaim.boundAgent !== null) {
+                clearInterval(heartbeat);
+                entry.heartbeatTimer = undefined;
+                return;
+              }
+              const now = Date.now();
+              entry.hostMintedClaim.mintedAt = now;
+              entry.hostMintedClaim.expiresAt = now + HOST_MINT_TTL_MS;
+              writeInstanceManifest(entry).catch((err: Error) =>
+                process.stderr.write(
+                  `[tesseron] heartbeat manifest write failed: ${err.message}\n`,
+                ),
+              );
+            }, HEARTBEAT_INTERVAL_MS);
+            heartbeat.unref?.();
+            entry.heartbeatTimer = heartbeat;
+
             ws.on('message', (data: RawData, isBinary: boolean) => {
               // `ws` hands us a Buffer for both text and binary frames. Calling
               // send(Buffer) without options forwards as a binary frame, which
@@ -278,6 +332,79 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
               // drops (it only handles string frames). Decode text frames back
               // to a string so the frame type round-trips correctly.
               const payload: RawData | string = isBinary ? data : rawDataToString(data);
+              // Intercept the SDK's `tesseron/hello` and synthesize a
+              // welcome immediately. Without this, the SDK is blocked
+              // waiting for a peer that will never speak — the gateway
+              // doesn't dial until `tesseron__claim_session` completes,
+              // and the user can't paste a code they haven't seen yet.
+              // The welcome carries the host-minted claim code; the
+              // browser app shows it; the user pastes it; the gateway
+              // dials with the bind subprotocol; the cached hello below
+              // is replayed to the gateway, the gateway processes it,
+              // and the gateway's reply is discarded (synthesized
+              // welcome already went to the SDK).
+              if (!entry.helloAnswered && !isBinary) {
+                const parsed = parseJsonFrame(payload);
+                if (
+                  parsed !== null &&
+                  typeof parsed === 'object' &&
+                  (parsed as { method?: unknown }).method === 'tesseron/hello'
+                ) {
+                  const m = parsed as { id?: unknown; params?: { app?: { id?: unknown } } };
+                  // Validate the app.id before synthesizing — defends
+                  // against the SDK trying to claim a reserved id (e.g.
+                  // 'tesseron') or a malformed identifier. The legacy
+                  // path got this for free from the gateway's hello
+                  // handler; with the host synthesizing locally we
+                  // re-apply the same validation here so the SDK's
+                  // connect() promise rejects with a clear message
+                  // rather than appearing to succeed and breaking
+                  // later.
+                  const appId = m.params?.app?.id;
+                  if (typeof appId === 'string') {
+                    try {
+                      validateAppId(appId);
+                    } catch (err) {
+                      const reason = err instanceof Error ? err.message : String(err);
+                      ws.send(
+                        JSON.stringify({
+                          jsonrpc: '2.0',
+                          id: m.id ?? null,
+                          error: {
+                            code: -32600,
+                            message: reason,
+                          },
+                        }),
+                      );
+                      entry.helloAnswered = true;
+                      return;
+                    }
+                  }
+                  entry.cachedHello = { id: m.id, params: m.params };
+                  entry.helloAnswered = true;
+                  const synthesized: WelcomeResult = {
+                    sessionId: entry.hostMintedClaim.sessionId,
+                    protocolVersion: PROTOCOL_VERSION,
+                    capabilities: {
+                      streaming: true,
+                      subscriptions: true,
+                      sampling: false,
+                      elicitation: false,
+                    },
+                    agent: { id: 'pending', name: 'Awaiting agent' },
+                    claimCode: entry.hostMintedClaim.code,
+                    resumeToken: entry.hostMintedClaim.resumeToken,
+                  };
+                  ws.send(
+                    JSON.stringify({
+                      jsonrpc: '2.0',
+                      id: m.id ?? null,
+                      result: synthesized,
+                    }),
+                  );
+                  return;
+                }
+              }
               if (entry.gatewayWs?.readyState === 1 /* OPEN */) {
                 entry.gatewayWs.send(payload);
               } else {
@@ -287,12 +414,14 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
 
             ws.on('close', () => {
               instances.delete(instanceId);
+              if (entry.heartbeatTimer) clearInterval(entry.heartbeatTimer);
               entry.gatewayWs?.close(1000, 'Browser disconnected');
               deleteManifest(instanceId).catch(() => {});
             });
 
             ws.on('error', () => {
               instances.delete(instanceId);
+              if (entry.heartbeatTimer) clearInterval(entry.heartbeatTimer);
               entry.gatewayWs?.close(1000, 'Browser error');
               deleteManifest(instanceId).catch(() => {});
             });
@@ -357,13 +486,40 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
             Array.isArray(protoHeader) ? protoHeader.join(', ') : protoHeader,
           );
           if (bind.code !== null) {
+            // Rate-limit lockout. Once the rolling window crosses
+            // BIND_FAILURE_THRESHOLD mismatches, every subsequent bind
+            // upgrade gets HTTP 429 for BIND_FAILURE_LOCKOUT_MS — long
+            // enough to make sustained brute force expensive without
+            // breaking a legitimate retry loop.
+            const now = Date.now();
+            if (now < entry.bindLockoutUntil) {
+              const body =
+                'Too many bind failures; this instance is locked out. Reload the tab to mint a fresh session.';
+              socket.end(
+                `HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+              );
+              return;
+            }
             // Constant-time compare against the minted code to deny a
             // timing-side-channel attacker enumerating prefixes via
             // upgrade-rejection latency.
             if (!constantTimeEqual(bind.code, entry.hostMintedClaim.code)) {
-              process.stderr.write(
-                `[tesseron] rejecting bind subprotocol upgrade for instance ${instanceId} (code mismatch)\n`,
-              );
+              const cutoff = now - BIND_FAILURE_WINDOW_MS;
+              while (entry.bindFailureTimes.length > 0 && entry.bindFailureTimes[0]! < cutoff) {
+                entry.bindFailureTimes.shift();
+              }
+              entry.bindFailureTimes.push(now);
+              if (entry.bindFailureTimes.length >= BIND_FAILURE_THRESHOLD) {
+                entry.bindLockoutUntil = now + BIND_FAILURE_LOCKOUT_MS;
+                entry.bindFailureTimes = [];
+                process.stderr.write(
+                  `[tesseron] bind rate-limit triggered for instance ${instanceId}; locked out for ${BIND_FAILURE_LOCKOUT_MS}ms\n`,
+                );
+              } else {
+                process.stderr.write(
+                  `[tesseron] rejecting bind subprotocol upgrade for instance ${instanceId} (code mismatch)\n`,
+                );
+              }
               const body = 'Bind code does not match the host-minted claim.';
               socket.end(
                 `HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
@@ -377,6 +533,8 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
               );
               return;
             }
+            // Reset failure counter on successful bind.
+            entry.bindFailureTimes = [];
             entry.boundViaSubprotocol = true;
           } else if (bind.reason !== undefined) {
             // Header was malformed (multiple bind elements, bad grammar).
@@ -389,99 +547,60 @@ export function tesseron(options: TesseronViteOptions = {}): Plugin {
             return;
           }
 
+          // Legacy v1.1 gateway dials (no bind subprotocol) are now
+          // rejected. The plugin has already minted a host-side claim
+          // code and synthesized a welcome to the SDK; allowing a
+          // legacy auto-dial through would produce a second, conflicting
+          // welcome from the gateway and confuse the SDK's already-
+          // resolved hello promise. Users running an old gateway against
+          // a new plugin need to upgrade the gateway alongside.
+          //
+          // The 426 Upgrade Required response signals "the protocol you
+          // dialed with is incompatible; switch to a newer one" — the
+          // closest HTTP status to "v1.2 required."
+          if (!entry.boundViaSubprotocol) {
+            process.stderr.write(
+              `[tesseron] rejecting legacy auto-dial for instance ${instanceId}: gateway must speak v1.2 (use the tesseron-bind.<code> subprotocol). Upgrade @tesseron/mcp to >= 2.4.0.\n`,
+            );
+            const body =
+              'This Tesseron host requires a v1.2-compatible gateway (tesseron-bind subprotocol). Upgrade @tesseron/mcp to >= 2.4.0.';
+            socket.end(
+              `HTTP/1.1 426 Upgrade Required\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+            );
+            return;
+          }
+
           wss.handleUpgrade(req, socket, head, (ws) => {
             entry.gatewayWs = ws;
 
-            if (entry.boundViaSubprotocol) {
-              // V3 path: the gateway has authenticated via the bind
-              // subprotocol. The plugin synthesizes the welcome to the
-              // SDK using its minted credentials, then replays the
-              // cached SDK hello to the gateway with a unique internal
-              // id and discards the gateway's reply by id. Subsequent
-              // traffic flows in both directions normally.
-              const helloFrame = entry.queue.find((m) => isHelloRequest(m));
-              if (helloFrame !== undefined) {
-                const helloMsg = parseJsonFrame(helloFrame) as {
-                  id?: unknown;
-                  params?: HelloParams;
-                };
-                const sdkHelloId = helloMsg.id ?? null;
-                const helloParams = helloMsg.params;
-
-                // Synthesize the welcome to the SDK. Sentinel agent
-                // matches the existing `tesseron/welcome` shape for an
-                // unclaimed session — the gateway's `tesseron/claimed`
-                // notification (forwarded later) flips it to the real
-                // identity AND overwrites `capabilities` with the
-                // gateway's authoritative bits via the new
-                // `agentCapabilities` field on the notification.
-                //
-                // **Conservative pre-claim capabilities.** The host has
-                // no way of knowing which sampling / elicitation
-                // features the eventual MCP client supports, so it
-                // reports `false` for both. Action handlers that gate
-                // on `ctx.agentCapabilities.sampling` will see this as
-                // "not available" until the claimed notification flips
-                // it. Echoing `helloParams.capabilities` here would
-                // surface the SDK's *own* capability bits — wrong, and
-                // the source of a sampling-handler bug where the
-                // capability check passes locally but the gateway
-                // can't actually deliver.
-                const synthesizedWelcome: WelcomeResult = {
-                  sessionId: entry.hostMintedClaim.sessionId,
-                  protocolVersion: PROTOCOL_VERSION,
-                  capabilities: {
-                    streaming: true,
-                    subscriptions: true,
-                    sampling: false,
-                    elicitation: false,
-                  },
-                  agent: { id: 'pending', name: 'Awaiting agent' },
-                  claimCode: entry.hostMintedClaim.code,
-                  resumeToken: entry.hostMintedClaim.resumeToken,
-                };
-                const welcomeResponse = {
-                  jsonrpc: '2.0' as const,
-                  id: sdkHelloId,
-                  result: synthesizedWelcome,
-                };
-                if (entry.browserWs.readyState === 1) {
-                  entry.browserWs.send(JSON.stringify(welcomeResponse));
-                }
-
-                // Replay the hello to the gateway with a UUID-anchored id
-                // we can drop on the way back. The id has to be
-                // collision-resistant across instances: two instances
-                // bound within the same millisecond would otherwise
-                // share an id and the cross-instance discard logic
-                // would drop each other's frames. `crypto.randomUUID()`
-                // is 122 bits of entropy and unique per call.
-                entry.helloReplayId = `__tesseron-host-replay-${globalThis.crypto.randomUUID()}`;
-                const replayFrame = JSON.stringify({
-                  jsonrpc: '2.0',
-                  id: entry.helloReplayId,
-                  method: 'tesseron/hello',
-                  params: helloParams,
-                });
-                ws.send(replayFrame);
-              }
-              // Forward any remaining queued (non-hello) messages to the
-              // gateway as in the legacy path.
-              for (const msg of entry.queue) {
-                if (!isHelloRequest(msg)) ws.send(msg);
-              }
-              entry.queue = [];
-            } else {
-              // Legacy v1.1 path: drain the queue (incl. the SDK's
-              // hello) to the gateway. The gateway mints its own claim
-              // code and the plugin's hostMintedClaim is unused for
-              // this session — harmless dead state until the manifest
-              // is unlinked on browser close.
-              for (const msg of entry.queue) {
-                ws.send(msg);
-              }
-              entry.queue = [];
+            // V3 path: the gateway has authenticated via the bind
+            // subprotocol. Replay the SDK's cached hello to the gateway
+            // with a unique internal id, and discard the gateway's
+            // welcome reply by id (the SDK already received the
+            // synthesized welcome on its hello). Subsequent traffic
+            // flows in both directions normally.
+            //
+            // The cached hello is captured by the browser-side WS
+            // handler when the SDK first sends `tesseron/hello`. If a
+            // gateway somehow dials before the SDK has sent hello (race
+            // we've never observed because the SDK sends hello on open),
+            // we fall through to the queue-drain branch below — the
+            // SDK's hello will arrive later and follow the live-bound
+            // forward path.
+            if (entry.cachedHello !== undefined) {
+              entry.helloReplayId = `__tesseron-host-replay-${globalThis.crypto.randomUUID()}`;
+              const replayFrame = JSON.stringify({
+                jsonrpc: '2.0',
+                id: entry.helloReplayId,
+                method: 'tesseron/hello',
+                params: entry.cachedHello.params,
+              });
+              ws.send(replayFrame);
             }
+            for (const msg of entry.queue) {
+              if (!isHelloRequest(msg)) ws.send(msg);
+            }
+            entry.queue = [];
 
             ws.on('message', (data: RawData, isBinary: boolean) => {
               const payload: RawData | string = isBinary ? data : rawDataToString(data);

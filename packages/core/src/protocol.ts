@@ -280,9 +280,30 @@ export interface LogParams {
   meta?: Record<string, unknown>;
 }
 
+/**
+ * Parameters of the `tesseron/bind` request a v1.2 gateway sends as the
+ * very first frame after a UDS connect, when dialing a host-minted
+ * manifest. Replaces the WebSocket `tesseron-bind.<code>` subprotocol
+ * element on transports without a subprotocol concept of their own.
+ *
+ * The host validates `code` against its in-memory `hostMintedClaim.code`
+ * in constant time. On success: replies `{ ok: true }`, marks the bind
+ * authoritative, and proceeds with the v3 hello-replay flow. On
+ * mismatch: replies with `Unauthorized` and closes the channel.
+ */
+export interface BindParams {
+  code: string;
+}
+
+/** Response to `tesseron/bind`. Only `{ ok: true }` is meaningful. */
+export interface BindResult {
+  ok: true;
+}
+
 export interface TesseronMethods {
   'tesseron/hello': { params: HelloParams; result: WelcomeResult };
   'tesseron/resume': { params: ResumeParams; result: ResumeResult };
+  'tesseron/bind': { params: BindParams; result: BindResult };
   'sampling/request': { params: SamplingRequestParams; result: SamplingResult };
   'elicitation/request': { params: ElicitationRequestParams; result: ElicitationResult };
   'actions/invoke': { params: ActionInvokeParams; result: ActionResultPayload };

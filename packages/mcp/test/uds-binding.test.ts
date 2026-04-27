@@ -60,7 +60,15 @@ describeOrSkip('UDS binding (uds dialer + UnixSocketServerTransport)', () => {
     const connectPromise = sdk.connect({ transport: 'uds' });
     const inst = await waitForInstanceFile(sandbox, { since: startedAt - 50 });
     expect(inst.spec.kind).toBe('uds');
-    await gateway.connectToApp(inst.instanceId, inst.spec);
+    if (inst.hostMintedClaim !== undefined) {
+      await gateway.connectToApp(inst.instanceId, inst.spec, {
+        bindCode: inst.hostMintedClaim.code,
+        hostMintedSessionId: inst.hostMintedClaim.sessionId,
+        hostMintedResumeToken: inst.hostMintedClaim.resumeToken,
+      });
+    } else {
+      await gateway.connectToApp(inst.instanceId, inst.spec);
+    }
     const welcome = await connectPromise;
     expect(welcome.claimCode).toBeTruthy();
 

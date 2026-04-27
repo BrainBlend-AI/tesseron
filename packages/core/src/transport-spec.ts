@@ -112,6 +112,16 @@ export interface HostMintedClaim {
   /** Unix-millis timestamp when the host minted the code. */
   mintedAt: number;
   /**
+   * Unix-millis sliding TTL deadline. The host rewrites the manifest
+   * every half-TTL with a refreshed `mintedAt` and `expiresAt` while
+   * the SDK is alive; once consumed (`boundAgent !== null`) the
+   * heartbeat stops. A gateway scanning for a code match skips entries
+   * whose `expiresAt < Date.now()`. Optional for the very first hosts
+   * shipping the field; absent ⇒ "no TTL, code lives until manifest
+   * unlink." Default TTL is 10 minutes.
+   */
+  expiresAt?: number;
+  /**
    * `null` until the claim is consumed; set to the bound agent's identity
    * after `tesseron__claim_session` succeeds. A non-null value means the
    * code has been spent and is no longer claimable.
