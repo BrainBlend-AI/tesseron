@@ -18833,8 +18833,8 @@ var import_promises2 = require("fs/promises");
 var import_node_os = require("os");
 var import_node_path2 = require("path");
 
-// ../core/dist/chunk-23D3TVHV.js
-var PROTOCOL_VERSION = "1.1.0";
+// ../core/dist/chunk-4YO6JR4M.js
+var PROTOCOL_VERSION = "1.2.0";
 var JSONRPC_VERSION2 = "2.0";
 var TesseronErrorCode = {
   ParseError: -32700,
@@ -18856,7 +18856,7 @@ var TesseronErrorCode = {
   ResumeFailed: -32011
 };
 
-// ../core/dist/chunk-DFFIHUAF.js
+// ../core/dist/chunk-XGJKNUCM.js
 var TesseronError = class extends Error {
   /** Numeric error code from {@link TesseronErrorCode}. */
   code;
@@ -18901,7 +18901,7 @@ var ElicitationNotAvailableError = class extends TesseronError {
   }
 };
 
-// ../core/dist/chunk-ZQX6Q5CV.js
+// ../core/dist/chunk-TG667TYA.js
 var TransportClosedError = class extends TesseronError {
   constructor(reason) {
     super(

@@ -193,6 +193,21 @@ export class NodeWebSocketServerTransport implements Transport {
           );
           return;
         }
+        // Concurrent-bind race: between this check passing and
+        // `wss.handleUpgrade` actually attaching the gateway WebSocket
+        // (and {@link attachGateway} setting `this.ws`), a second
+        // concurrent valid bind upgrade could otherwise pass the same
+        // gates and call `handleUpgrade` again. The `if (this.ws)`
+        // check below sees `undefined` until handleUpgrade fires its
+        // callback. Setting `boundViaSubprotocol` is the early
+        // marker the second concurrent attempt sees.
+        if (this.boundViaSubprotocol) {
+          const body = 'Bind already in progress; mint a fresh session.';
+          socket.end(
+            `HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+          );
+          return;
+        }
         // Reset the failure window on a successful bind so a slow brute-
         // force can't accumulate a lock-out across an eventual hit.
         this.bindFailureTimes.length = 0;
@@ -242,7 +257,11 @@ export class NodeWebSocketServerTransport implements Transport {
     if (!addr || typeof addr === 'string') {
       throw new Error('Failed to obtain listening address');
     }
-    const wsUrl = `ws://${host}:${addr.port}/`;
+    // Bracket IPv6 hosts so the URL parses cleanly. `ws://::1:54213/` is
+    // ambiguous — the parser can't tell which `:` separates host from
+    // port. RFC 3986 §3.2.2 requires brackets around literal IPv6.
+    const hostPart = host.includes(':') ? `[${host}]` : host;
+    const wsUrl = `ws://${hostPart}:${addr.port}/`;
     await this.writeManifest(wsUrl);
     this.startHeartbeat(wsUrl);
   }
@@ -306,6 +325,13 @@ export class NodeWebSocketServerTransport implements Transport {
     });
 
     ws.on('close', (_code: number, reason: Buffer) => {
+      // Release the slot so a future gateway re-dial can attempt.
+      // Without this, the next upgrade hits `if (this.ws)` and is
+      // rejected forever, leaving the host transport unable to
+      // re-bind after a transient disconnect.
+      if (this.ws === ws) {
+        this.ws = undefined;
+      }
       const text = reason.toString('utf-8');
       for (const handler of this.closeHandlers) handler(text);
     });

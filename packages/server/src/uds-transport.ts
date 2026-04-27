@@ -4,7 +4,7 @@ import { type Server, type Socket, createServer } from 'node:net';
 import { homedir, platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentIdentity, HelloParams, Transport, WelcomeResult } from '@tesseron/core';
-import { PROTOCOL_VERSION } from '@tesseron/core';
+import { PROTOCOL_VERSION, TesseronErrorCode } from '@tesseron/core';
 import { constantTimeEqual } from '@tesseron/core/internal';
 import { mintClaimCode, mintResumeToken, mintSessionId } from './claim-mint.js';
 import { writePrivateFile } from './fs-hygiene.js';
@@ -163,6 +163,22 @@ export class UnixSocketServerTransport implements Transport {
 
     socket.on('data', (chunk: string) => this.onData(chunk));
     socket.on('close', () => {
+      // Pre-bind close (bind mismatch, rate-limit lockout, legacy
+      // auto-dial reject) → release the slot so a fresh gateway dial
+      // can attempt without permanently disabling the host transport.
+      // The SDK's close handlers only fire for a *bound* channel
+      // dropping — a failed bind attempt is ephemeral and not a
+      // transport-level close from the SDK's perspective.
+      const wasOurSocket = this.socket === socket;
+      const wasBound = this.boundViaHandshake;
+      if (wasOurSocket && !wasBound) {
+        this.socket = undefined;
+        this.buffer = '';
+        return;
+      }
+      if (wasOurSocket) {
+        this.socket = undefined;
+      }
       for (const handler of this.closeHandlers) handler();
     });
     socket.on('error', () => {
@@ -226,6 +242,29 @@ export class UnixSocketServerTransport implements Transport {
       this.helloReplayId = undefined;
       return;
     }
+    if (!this.boundViaHandshake) {
+      // Symmetric to the WS server transport's HTTP 426 rejection of
+      // legacy auto-dials: a v1.1 gateway that connected to this UDS
+      // and skipped `tesseron/bind` is incompatible. Without this
+      // rejection the channel would silently consume the SDK's
+      // post-welcome traffic without ever bridging to the gateway,
+      // and the dial would hang. Surface a clear error and close.
+      process.stderr.write(
+        `[tesseron] rejecting legacy UDS auto-dial for instance ${this.instanceId}: gateway must speak v1.2 (send tesseron/bind as the first frame). Upgrade @tesseron/mcp to >= 2.4.0.\n`,
+      );
+      const reqId =
+        typeof parsed === 'object' && parsed !== null && 'id' in parsed
+          ? (((parsed as { id?: unknown }).id as string | number | null) ?? null)
+          : null;
+      this.respondBindError(
+        reqId,
+        TesseronErrorCode.InvalidRequest,
+        'requires v1.2 gateway (tesseron/bind first)',
+      );
+      this.socket?.end();
+      this.socket?.destroy();
+      return;
+    }
     for (const handler of this.messageHandlers) handler(parsed);
   }
 
@@ -236,26 +275,30 @@ export class UnixSocketServerTransport implements Transport {
   }): void {
     const now = Date.now();
     if (now < this.bindLockoutUntil) {
-      this.respondBindError(req.id, -32009, 'rate-limit lockout');
+      this.respondBindError(req.id, TesseronErrorCode.Unauthorized, 'rate-limit lockout');
       this.socket?.end();
       this.socket?.destroy();
       return;
     }
     if (this.boundViaHandshake) {
-      this.respondBindError(req.id, -32009, 'already bound');
+      this.respondBindError(req.id, TesseronErrorCode.Unauthorized, 'already bound');
       return;
     }
     if (this.hostMintedClaim.boundAgent !== null) {
-      this.respondBindError(req.id, -32009, 'claim already spent');
+      this.respondBindError(req.id, TesseronErrorCode.Unauthorized, 'claim already spent');
       return;
     }
     if (typeof req.params?.code !== 'string') {
-      this.respondBindError(req.id, -32602, 'bind requires `code` string param');
+      this.respondBindError(
+        req.id,
+        TesseronErrorCode.InvalidParams,
+        'bind requires `code` string param',
+      );
       return;
     }
-    if (!constantTimeEqual(req.params.code, this.hostMintedClaim.code)) {
+    if (!constantTimeEqual(req.params.code.toUpperCase(), this.hostMintedClaim.code)) {
       this.recordBindFailure(now);
-      this.respondBindError(req.id, -32009, 'bind code mismatch');
+      this.respondBindError(req.id, TesseronErrorCode.Unauthorized, 'bind code mismatch');
       this.socket?.end();
       this.socket?.destroy();
       return;

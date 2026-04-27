@@ -83,11 +83,25 @@ describe('parseBindSubprotocol', () => {
     expect(parseBindSubprotocol('not-tesseron-bind.foo').code).toBeNull();
   });
 
-  it('parser inverts the formatter (round-trip)', () => {
-    const codes = ['AB3X-7K', 'CD9Y-2M', 'XXXX-YY', 'a1b2-c3', '0123-45'];
+  it('parser inverts the formatter for upper-case codes (host mints upper-case)', () => {
+    const codes = ['AB3X-7K', 'CD9Y-2M', 'XXXX-YY', '0123-45'];
     for (const code of codes) {
       const header = `tesseron-gateway, ${formatBindSubprotocol(code)}`;
       expect(parseBindSubprotocol(header)).toEqual({ code });
     }
+  });
+
+  it('canonicalizes mixed-case codes to upper-case to match host-mint format', () => {
+    // Host mints from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (upper-case
+    // only) and validates with constant-time bytewise compare. If a
+    // user pastes their code lower-case, the gateway forwards
+    // lower-case, and the parser must canonicalize so the compare
+    // succeeds.
+    expect(parseBindSubprotocol('tesseron-gateway, tesseron-bind.a1b2-c3')).toEqual({
+      code: 'A1B2-C3',
+    });
+    expect(parseBindSubprotocol('tesseron-gateway, tesseron-bind.aB3x-7K')).toEqual({
+      code: 'AB3X-7K',
+    });
   });
 });
