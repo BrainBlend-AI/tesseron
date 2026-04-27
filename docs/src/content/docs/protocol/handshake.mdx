@@ -152,9 +152,13 @@ Because in-band claim is just security theatre over localhost. Anything running 
 
 ## Multiple gateways on one machine
 
-A developer machine may have several Tesseron MCP gateways alive at once - typically one per running Claude Code session, sometimes more if a dev checkout's `plugin/server/index.cjs` is also loaded. Each gateway watches `~/.tesseron/instances/` and dials the bindings it discovers. The first gateway to upgrade a given browser instance owns the bridge for that session (the Vite plugin rejects subsequent upgrades with `HTTP 409`); the welcome+claim code returns through that one gateway.
+A developer machine may have several Tesseron MCP gateways alive at once - typically one per running Claude Code session, sometimes more if a dev checkout's `plugin/server/index.cjs` is also loaded. The wire path is one of two flavours, picked at host build time and signalled in the instance manifest.
 
-Sibling gateways therefore see the user-typed claim code but have no matching pending session locally. Without a hint they would fail with a flat "no pending session", and the user has no way to tell which Claude window minted the code. To make the failure explicit, every gateway drops a breadcrumb at `~/.tesseron/claims/<CODE>.json` when it mints a claim code:
+**Claim-mediated dial (default since `@tesseron/vite@2.2.0`, `@tesseron/mcp@2.4.0`).** The host (Vite plugin / `@tesseron/server`) mints the claim code, session id, and resume token at instance creation, writes them into the manifest's `hostMintedClaim` field, and sets `helloHandledByHost: true`. The gateway treats these as the signal "do not auto-dial." When the user pastes the code into one specific Claude session, that gateway scans every host-mint manifest for a matching `hostMintedClaim.code`, dials only the matching instance with the `Sec-WebSocket-Protocol: tesseron-gateway, tesseron-bind.<code>` upgrade header, and the host validates the bind in constant time before accepting. No race, no "switch to the right Claude" detour: the user's paste deterministically picks the gateway. See [tesseron#60](https://github.com/BrainBlend-AI/tesseron/issues/60).
+
+**Legacy auto-dial.** Gateways before 2.4.0 (and hosts before 2.2.0) take the original path: each gateway watches `~/.tesseron/instances/` and dials the bindings it discovers. The first gateway to upgrade a given browser instance owns the bridge for that session (the Vite plugin rejects subsequent upgrades with `HTTP 409`); the welcome+claim code returns through that one gateway.
+
+In the legacy flow, sibling gateways see the user-typed claim code but have no matching pending session locally. Without a hint they would fail with a flat "no pending session", and the user has no way to tell which Claude window minted the code. To make the failure explicit, every gateway in the legacy path drops a breadcrumb at `~/.tesseron/claims/<CODE>.json` when it mints a claim code:
 
 ```json
 {

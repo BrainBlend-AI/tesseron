@@ -623,7 +623,7 @@ export class McpAgentBridge {
     if (!code) {
       return errorResult('Missing "code" argument. Provide the 6-character claim code.');
     }
-    const session = this.gateway.claimSession(code);
+    const session = await this.gateway.claimSession(code);
     if (!session) {
       // Each running gateway has its own pendingClaims map (post-#54 single-
       // owner binding pins each browser instance to exactly one gateway).

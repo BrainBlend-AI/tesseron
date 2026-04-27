@@ -19100,6 +19100,30 @@ function constantTimeEqual(a, b) {
   return mismatch === 0;
 }
 
+// ../core/src/bind-subprotocol.ts
+var PREFIX = "tesseron-bind.";
+function formatBindSubprotocol(code) {
+  if (!isWellFormedBindCode(code)) {
+    throw new RangeError(
+      `bind code ${JSON.stringify(code)} contains characters disallowed in WebSocket subprotocol tokens`
+    );
+  }
+  return `${PREFIX}${code}`;
+}
+function isWellFormedBindCode(code) {
+  if (code.length === 0 || code.length > 64) return false;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code.charCodeAt(i);
+    const isUpper = ch >= 65 && ch <= 90;
+    const isLower = ch >= 97 && ch <= 122;
+    const isDigit = ch >= 48 && ch <= 57;
+    const isDash = ch === 45;
+    const isUnderscore = ch === 95;
+    if (!(isUpper || isLower || isDigit || isDash || isUnderscore)) return false;
+  }
+  return true;
+}
+
 // src/dialer.ts
 var import_node_buffer = require("buffer");
 var import_node_net = require("net");
@@ -19118,8 +19142,12 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 var GATEWAY_SUBPROTOCOL = "tesseron-gateway";
 var WsDialer = class {
   kind = "ws";
-  dial(spec) {
-    const ws = new import_websocket.default(spec.url, [GATEWAY_SUBPROTOCOL]);
+  dial(spec, options = {}) {
+    const subprotocols = [GATEWAY_SUBPROTOCOL];
+    if (options.bindCode !== void 0) {
+      subprotocols.push(formatBindSubprotocol(options.bindCode));
+    }
+    const ws = new import_websocket.default(spec.url, subprotocols);
     const messageHandlers = [];
     const closeHandlers = [];
     ws.on("message", (data) => {
@@ -19172,7 +19200,7 @@ var WsDialer = class {
 };
 var UdsDialer = class {
   kind = "uds";
-  dial(spec) {
+  dial(spec, _options = {}) {
     const socket = (0, import_node_net.connect)({ path: spec.path });
     const messageHandlers = [];
     const closeHandlers = [];
@@ -19413,6 +19441,21 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    */
   tombstonedManifests = /* @__PURE__ */ new Set();
   /**
+   * Manifests with `helloHandledByHost: true` discovered via `watchInstances`
+   * but NOT auto-dialed. The gateway dials these only on
+   * `tesseron__claim_session` when a code matches an entry's
+   * `hostMintedClaim.code`. See tesseron#60.
+   */
+  hostMintedInstances = /* @__PURE__ */ new Map();
+  /**
+   * In-flight `claimSession` deferreds keyed by instanceId, populated before
+   * the gateway dials a host-minted instance and resolved by the hello
+   * handler when the v3 mode session is registered. Lets `claimSession`
+   * await the round-trip from "dialed" to "session marked claimed" and
+   * return the resulting `Session` synchronously to its caller.
+   */
+  hostMintedClaimResolvers = /* @__PURE__ */ new Map();
+  /**
    * Write a discovery / dial-outcome event to stderr (kept for grep-ability)
    * and emit it as `'gateway-log'` so any attached MCP bridge can forward it
    * to the connected agent via `notifications/message`. Used by the discovery
@@ -19491,15 +19534,21 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    * @param instanceId - Unique ID assigned by the SDK side; used to deduplicate.
    * @param spec - {@link TransportSpec} discriminating which dialer to use.
    */
-  async connectToApp(instanceId, spec) {
+  async connectToApp(instanceId, spec, options = {}) {
     if (this.connected.has(instanceId)) return;
     const dialer = this.dialers.get(spec.kind);
     if (!dialer) {
       throw new Error(`No dialer registered for transport kind "${spec.kind}".`);
     }
-    const dialed = dialer.dial(spec);
+    const dialed = dialer.dial(spec, { bindCode: options.bindCode });
     this.connected.set(instanceId, dialed);
-    this.handleConnection(dialed.transport, void 0);
+    const bindContext = options.bindCode !== void 0 ? {
+      instanceId,
+      code: options.bindCode,
+      hostMintedSessionId: options.hostMintedSessionId,
+      hostMintedResumeToken: options.hostMintedResumeToken
+    } : void 0;
+    this.handleConnection(dialed.transport, void 0, bindContext);
     dialed.onClose(() => {
       this.connected.delete(instanceId);
     });
@@ -19572,6 +19621,11 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
               continue;
             }
             const id = data.instanceId ?? instanceId;
+            if (data.helloHandledByHost === true) {
+              this.hostMintedInstances.set(id, data);
+              continue;
+            }
+            this.hostMintedInstances.delete(id);
             this.connectToApp(id, data.transport).catch((err) => {
               this.emitDiscoveryLog({
                 level: "warning",
@@ -19712,25 +19766,94 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    * `sessions-changed` on success and a `tesseron/claimed` notification to the
    * SDK so consumers can clear the now-spent `claimCode` from their UI.
    */
-  claimSession(claimCode) {
-    const sessionId = this.pendingClaims.get(claimCode.toUpperCase());
-    if (!sessionId) return null;
-    const session = this.sessions.get(sessionId);
-    if (!session || session.claimed) return null;
-    session.claimed = true;
-    session.claimedAt = Date.now();
-    this.pendingClaims.delete(claimCode.toUpperCase());
-    void awaitThenRemoveClaimRecord(session.claimRecordWritten, claimCode);
-    const clientName = this.agentCapabilities.clientName;
-    session.dispatcher.notify("tesseron/claimed", {
-      agent: {
-        id: clientName ?? "pending",
-        name: clientName ?? "Awaiting agent"
-      },
-      claimedAt: session.claimedAt
-    });
-    this.emit("sessions-changed");
-    return session;
+  async claimSession(claimCode) {
+    const upper = claimCode.toUpperCase();
+    const sessionId = this.pendingClaims.get(upper);
+    if (sessionId !== void 0) {
+      const session = this.sessions.get(sessionId);
+      if (!session || session.claimed) return null;
+      session.claimed = true;
+      session.claimedAt = Date.now();
+      this.pendingClaims.delete(upper);
+      void awaitThenRemoveClaimRecord(session.claimRecordWritten, claimCode);
+      const clientName = this.agentCapabilities.clientName;
+      session.dispatcher.notify("tesseron/claimed", {
+        agent: {
+          id: clientName ?? "pending",
+          name: clientName ?? "Awaiting agent"
+        },
+        claimedAt: session.claimedAt,
+        // Send authoritative gateway capabilities on the legacy path
+        // too, so a v1.2 SDK paired with this gateway always sees the
+        // updated values regardless of which mint flow ran. v1.1 SDKs
+        // ignore the unknown field.
+        agentCapabilities: {
+          streaming: true,
+          subscriptions: true,
+          sampling: this.agentCapabilities.sampling,
+          elicitation: this.agentCapabilities.elicitation
+        }
+      });
+      this.emit("sessions-changed");
+      return session;
+    }
+    for (const [instanceId, manifest] of this.hostMintedInstances) {
+      const minted = manifest.hostMintedClaim;
+      if (!minted || minted.code.toUpperCase() !== upper) continue;
+      if (this.hostMintedClaimResolvers.has(instanceId)) {
+        this.emitDiscoveryLog({
+          level: "warning",
+          message: `host-mint claim already in flight for instance ${instanceId}; refusing concurrent retry`,
+          instanceId,
+          meta: { code: upper }
+        });
+        return null;
+      }
+      const claimed = new Promise((resolve, reject) => {
+        this.hostMintedClaimResolvers.set(instanceId, { resolve, reject });
+      });
+      try {
+        await this.connectToApp(instanceId, manifest.transport, {
+          bindCode: minted.code,
+          hostMintedSessionId: minted.sessionId,
+          hostMintedResumeToken: minted.resumeToken
+        });
+      } catch (err) {
+        this.hostMintedClaimResolvers.delete(instanceId);
+        this.connected.delete(instanceId);
+        this.emitDiscoveryLog({
+          level: "warning",
+          message: `host-mint dial for instance ${instanceId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          instanceId,
+          meta: { code: upper }
+        });
+        return null;
+      }
+      const timer = setTimeout(() => {
+        const pending = this.hostMintedClaimResolvers.get(instanceId);
+        if (pending) {
+          this.hostMintedClaimResolvers.delete(instanceId);
+          pending.reject(new Error("host-mint bind succeeded but hello never arrived"));
+        }
+      }, 5e3);
+      try {
+        const session = await claimed;
+        clearTimeout(timer);
+        this.hostMintedInstances.delete(instanceId);
+        return session;
+      } catch (err) {
+        clearTimeout(timer);
+        this.connected.delete(instanceId);
+        this.emitDiscoveryLog({
+          level: "warning",
+          message: `host-mint claim for instance ${instanceId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          instanceId,
+          meta: { code: upper }
+        });
+        return null;
+      }
+    }
+    return null;
   }
   /**
    * Invokes an action on a claimed session. Progress and log notifications are
@@ -19835,7 +19958,7 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
    * directly. `origin` is supplied by WS-binding code that knows the upgrade
    * request's `Origin` header; UDS and stdio bindings pass `undefined`.
    */
-  handleConnection(transport, origin) {
+  handleConnection(transport, origin, bindContext) {
     const dispatcher = new JsonRpcDispatcher((message) => {
       try {
         transport.send(message);
@@ -19918,9 +20041,72 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       if (origin && helloParams.app.origin !== origin) {
         helloParams.app.origin = origin;
       }
+      if (bindContext) {
+        const sessionId2 = bindContext.hostMintedSessionId ?? generateSessionId();
+        const resumeToken2 = bindContext.hostMintedResumeToken ?? generateResumeToken();
+        const claimedAt = Date.now();
+        const clientName = this.agentCapabilities.clientName;
+        const agent = {
+          id: clientName ?? "pending",
+          name: clientName ?? "Awaiting agent"
+        };
+        session = {
+          id: sessionId2,
+          app: helloParams.app,
+          transport,
+          dispatcher,
+          actions: helloParams.actions,
+          resources: helloParams.resources,
+          capabilities: helloParams.capabilities,
+          claimCode: bindContext.code,
+          claimed: true,
+          claimedAt,
+          resumeToken: resumeToken2
+        };
+        this.sessions.set(sessionId2, session);
+        logToStderr(
+          `[tesseron] host-mint session "${helloParams.app.name}" (${sessionId2}) \u2014 bound to claim code ${bindContext.code}`
+        );
+        const pending = this.hostMintedClaimResolvers.get(bindContext.instanceId);
+        if (pending) {
+          this.hostMintedClaimResolvers.delete(bindContext.instanceId);
+          pending.resolve(session);
+        }
+        const claimedSession = session;
+        const claimedCapabilities = {
+          streaming: true,
+          subscriptions: true,
+          sampling: this.agentCapabilities.sampling,
+          elicitation: this.agentCapabilities.elicitation
+        };
+        setImmediate(() => {
+          try {
+            claimedSession.dispatcher.notify("tesseron/claimed", {
+              agent,
+              claimedAt,
+              agentCapabilities: claimedCapabilities
+            });
+          } catch (err) {
+            if (!(err instanceof TransportClosedError)) {
+              const reason = err instanceof Error ? err.message : String(err);
+              logToStderr(`[tesseron] tesseron/claimed notify failed unexpectedly: ${reason}`);
+            }
+          }
+          this.emit("sessions-changed");
+        });
+        return {
+          sessionId: sessionId2,
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: claimedCapabilities,
+          agent,
+          // No claimCode in the response — the host's synthesized welcome
+          // already showed it. Repeating here would race the SDK's UI.
+          resumeToken: resumeToken2
+        };
+      }
       const sessionId = generateSessionId();
-      const claimCode = generateClaimCode();
       const resumeToken = generateResumeToken();
+      const claimCode = generateClaimCode();
       session = {
         id: sessionId,
         app: helloParams.app,
@@ -26293,7 +26479,7 @@ var McpAgentBridge = class {
     if (!code) {
       return errorResult('Missing "code" argument. Provide the 6-character claim code.');
     }
-    const session = this.gateway.claimSession(code);
+    const session = await this.gateway.claimSession(code);
     if (!session) {
       let foreign;
       try {

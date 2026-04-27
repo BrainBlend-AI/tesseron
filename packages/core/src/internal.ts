@@ -26,3 +26,8 @@ export {
 } from './builder-impl.js';
 export { SDK_CAPABILITIES } from './client.js';
 export { constantTimeEqual } from './timing-safe.js';
+export {
+  BIND_SUBPROTOCOL_PREFIX,
+  formatBindSubprotocol,
+  parseBindSubprotocol,
+} from './bind-subprotocol.js';
