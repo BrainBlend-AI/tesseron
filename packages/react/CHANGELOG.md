@@ -1,5 +1,13 @@
 # @tesseron/react
 
+## 2.5.0
+
+### Patch Changes
+
+- Updated dependencies [[`f93b7f6`](https://github.com/BrainBlend-AI/tesseron/commit/f93b7f6a3f607a9d6a36f309b64379ce4fb82d0c)]:
+  - @tesseron/core@2.5.0
+  - @tesseron/web@2.5.0
+
 ## 2.4.0
 
 ### Patch Changes
