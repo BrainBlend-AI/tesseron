@@ -137,6 +137,7 @@ describe('Tesseron MCP integration', () => {
       'tesseron__list_actions',
       'tesseron__invoke_action',
       'tesseron__read_resource',
+      'tesseron__list_pending_claims',
     ]);
   });
 
@@ -725,6 +726,196 @@ describe('Tesseron MCP integration', () => {
   });
 });
 
+describe('Pending claim recovery (tesseron#69)', () => {
+  /**
+   * Build a fresh gateway+bridge pair that watches a sandboxed
+   * `~/.tesseron/instances/` directory. Lets us write fake host-minted
+   * manifests directly to disk and observe the gateway pick them up — the
+   * test avoids the SDK dance because `@tesseron/server` always uses the
+   * v1.2 bind subprotocol, which auto-claims at dial time and never leaves
+   * a pending state we can enumerate.
+   */
+  async function buildRecoveryBridge(): Promise<{
+    gateway: TesseronGateway;
+    client: Client;
+    sandbox: Sandbox;
+    instancesDir: string;
+    cleanup: () => Promise<void>;
+  }> {
+    const localSandbox = prepareSandbox();
+    // Pre-create ~/.tesseron/instances so the gateway's fs.watch attaches
+    // immediately on startup. Without this the watcher falls back to the 2 s
+    // polling tick, which makes every test wait at least that long for the
+    // first manifest discovery.
+    const { mkdir } = await import('node:fs/promises');
+    const instancesDir = `${localSandbox.dir}/.tesseron/instances`;
+    await mkdir(instancesDir, { recursive: true });
+    const gw = new TesseronGateway();
+    const br = new McpAgentBridge({ gateway: gw });
+    const [agentSide, gatewaySide] = InMemoryTransport.createLinkedPair();
+    await br.connect(gatewaySide);
+    const c = new Client({ name: 'recovery-test', version: '0.0.0' });
+    await c.connect(agentSide);
+    const stopWatch = gw.watchInstances();
+    return {
+      gateway: gw,
+      client: c,
+      sandbox: localSandbox,
+      instancesDir,
+      cleanup: async () => {
+        stopWatch();
+        await c.close().catch(() => {});
+        await gw.stop().catch(() => {});
+        localSandbox.cleanup();
+      },
+    };
+  }
+
+  async function callBridgeTool(
+    c: Client,
+    name: string,
+    args: unknown,
+  ): Promise<{ text: string; isError: boolean }> {
+    const result = await c.request(
+      { method: 'tools/call', params: { name, arguments: (args ?? {}) as Record<string, unknown> } },
+      CallToolResultSchema,
+    );
+    const text = result.content.map((p) => (p.type === 'text' ? p.text : `[${p.type}]`)).join('');
+    return { text, isError: result.isError === true };
+  }
+
+  async function writePendingManifest(opts: {
+    instancesDir: string;
+    instanceId: string;
+    appName: string;
+    code: string;
+    mintedAt?: number;
+    expiresAt?: number;
+  }): Promise<void> {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(opts.instancesDir, { recursive: true });
+    const manifest = {
+      version: 2,
+      instanceId: opts.instanceId,
+      appName: opts.appName,
+      addedAt: Date.now(),
+      pid: process.pid,
+      transport: { kind: 'ws' as const, url: 'ws://127.0.0.1:1/never' },
+      helloHandledByHost: true,
+      hostMintedClaim: {
+        code: opts.code,
+        sessionId: `s_test_${opts.instanceId}`,
+        resumeToken: 'test-resume-token',
+        mintedAt: opts.mintedAt ?? Date.now(),
+        ...(opts.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
+        boundAgent: null,
+      },
+    };
+    await writeFile(`${opts.instancesDir}/${opts.instanceId}.json`, JSON.stringify(manifest));
+  }
+
+  it('tesseron__list_pending_claims is empty when nothing is pending', async () => {
+    const harness = await buildRecoveryBridge();
+    try {
+      const result = await callBridgeTool(harness.client, 'tesseron__list_pending_claims', {});
+      expect(result.isError).toBe(false);
+      expect(result.text).toMatch(/no pending claims/i);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it('tesseron__list_pending_claims surfaces a host-minted pending claim discovered on disk', async () => {
+    const harness = await buildRecoveryBridge();
+    try {
+      await writePendingManifest({
+        instancesDir: harness.instancesDir,
+        instanceId: 'inst-recovery-1',
+        appName: 'recoveryapp',
+        code: 'AAAA-22',
+      });
+      // Wait for the watcher to pick up the file. With instancesDir
+      // pre-created in the harness, fs.watch attaches before the manifest
+      // is written and the discovery callback runs on the next tick. A
+      // generous safety margin covers Windows' occasional fs.watch misses
+      // (the gateway's 2 s polling fallback then catches them).
+      await new Promise((r) => setTimeout(r, 2_500));
+
+      const result = await callBridgeTool(harness.client, 'tesseron__list_pending_claims', {});
+      expect(result.isError).toBe(false);
+      const payload = JSON.parse(result.text) as {
+        pending_claims: Array<{
+          code: string;
+          app_id: string;
+          app_name: string;
+          source: string;
+          minted_at: number;
+        }>;
+        next_step: string;
+      };
+      const entry = payload.pending_claims.find((c) => c.code === 'AAAA-22');
+      expect(entry).toBeTruthy();
+      expect(entry?.app_id).toBe('recoveryapp');
+      expect(entry?.source).toBe('host-minted');
+      expect(typeof entry?.minted_at).toBe('number');
+      expect(payload.next_step).toMatch(/tesseron__claim_session/);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it('tesseron__list_pending_claims omits expired host-minted claims', async () => {
+    const harness = await buildRecoveryBridge();
+    try {
+      await writePendingManifest({
+        instancesDir: harness.instancesDir,
+        instanceId: 'inst-expired-1',
+        appName: 'staleapp',
+        code: 'BBBB-33',
+        // Expired 1 minute ago — should be filtered out.
+        expiresAt: Date.now() - 60_000,
+      });
+      await new Promise((r) => setTimeout(r, 2_500));
+
+      const result = await callBridgeTool(harness.client, 'tesseron__list_pending_claims', {});
+      expect(result.isError).toBe(false);
+      // Either "No pending claims" text or a payload that doesn't list the expired entry.
+      if (!result.text.startsWith('{')) {
+        expect(result.text).toMatch(/no pending claims/i);
+      } else {
+        const payload = JSON.parse(result.text) as {
+          pending_claims: Array<{ code: string }>;
+        };
+        expect(payload.pending_claims.find((c) => c.code === 'BBBB-33')).toBeUndefined();
+      }
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it('tesseron__claim_session error lists pending claims when the typed code does not match any', async () => {
+    const harness = await buildRecoveryBridge();
+    try {
+      await writePendingManifest({
+        instancesDir: harness.instancesDir,
+        instanceId: 'inst-mistype-1',
+        appName: 'mistypeapp',
+        code: 'CCCC-44',
+      });
+      await new Promise((r) => setTimeout(r, 2_500));
+
+      const failed = await callBridgeTool(harness.client, 'tesseron__claim_session', {
+        code: 'XXXX-99',
+      });
+      expect(failed.isError).toBe(true);
+      expect(failed.text).toContain('CCCC-44');
+      expect(failed.text).toContain('mistypeapp');
+    } finally {
+      await harness.cleanup();
+    }
+  });
+});
+
 describe('Tool surface modes', () => {
   async function buildBridge(toolSurface: 'dynamic' | 'meta' | 'both'): Promise<{
     gateway: TesseronGateway;
@@ -776,6 +967,7 @@ describe('Tool surface modes', () => {
       expect(names).not.toContain('tesseron__list_actions');
       expect(names).not.toContain('tesseron__invoke_action');
       expect(names).not.toContain('tesseron__read_resource');
+      expect(names).not.toContain('tesseron__list_pending_claims');
     } finally {
       await cleanup();
     }
@@ -790,6 +982,7 @@ describe('Tool surface modes', () => {
       expect(names).toContain('tesseron__list_actions');
       expect(names).toContain('tesseron__invoke_action');
       expect(names).toContain('tesseron__read_resource');
+      expect(names).toContain('tesseron__list_pending_claims');
       expect(names).not.toContain('modeapp__ping');
       // dispatcher still works even though the per-app tool isn't listed
       const dispatched = await c.request(
@@ -817,6 +1010,7 @@ describe('Tool surface modes', () => {
       expect(names).toContain('tesseron__list_actions');
       expect(names).toContain('tesseron__invoke_action');
       expect(names).toContain('tesseron__read_resource');
+      expect(names).toContain('tesseron__list_pending_claims');
       expect(names).toContain('modeapp__ping');
     } finally {
       await cleanup();

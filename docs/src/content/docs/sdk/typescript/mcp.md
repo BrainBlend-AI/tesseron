@@ -81,10 +81,11 @@ When an MCP client spawns the gateway, the gateway exposes:
 - One built-in tool: `tesseron__claim_session`. Always present.
 - One tool per registered action across all connected sessions, named `<app_id>__<action_name>`.
 - One resource per registered resource, URI `tesseron://<app_id>/<resource_name>`.
-- Three meta-dispatcher tools in the default `both` / `meta` surface modes:
+- Four meta-dispatcher tools in the default `both` / `meta` surface modes:
   - `tesseron__list_actions` — enumerates every claimed session's actions and resources, plus the gateway's advertised MCP server name.
   - `tesseron__invoke_action({ app_id, action, args })` — calls any action without needing the per-app tool to be in the client's tool list.
   - `tesseron__read_resource({ app_id, name })` — reads a resource without needing the agent to know the client-side MCP server identifier (which varies by how the server is mounted; e.g. `plugin:tesseron:tesseron` under a Claude Code plugin vs. `tesseron` in a raw config). Prefer this over the generic `ReadMcpResourceTool`.
+  - `tesseron__list_pending_claims` — lists every claim code the gateway can currently redeem (gateway-minted sessions waiting for claim, plus host-minted manifests with an unconsumed code). Recovery path when a previously-claimed session is invalidated mid-conversation (browser refresh, dev-server reload, resume failure) and a tools/call returns "No claimed session found" — call this, pick the entry whose `app_id` matches, then call `tesseron__claim_session({ code })` to re-pair without asking the user to read the new code from the app UI. See [tesseron#69](https://github.com/BrainBlend-AI/tesseron/issues/69).
 - Full MCP logging (`sendLoggingMessage`), progress (`notifications/progress`), sampling (`createMessage`), and elicitation (`elicitInput`).
 
 Whenever a session connects, claims, or drops, the gateway emits `notifications/tools/list_changed` and `notifications/resources/list_changed`. The agent refreshes automatically.

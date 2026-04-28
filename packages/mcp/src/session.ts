@@ -25,6 +25,13 @@ export interface Session {
   claimed: boolean;
   claimedAt?: number;
   /**
+   * Unix-millis timestamp of when the session was created (i.e. when the
+   * gateway processed `tesseron/hello`). Lets {@link TesseronGateway.getPendingClaims}
+   * report a stable mintedAt to the agent without re-reading the on-disk
+   * claim breadcrumb.
+   */
+  mintedAt: number;
+  /**
    * Opaque server-issued token returned in the session's {@link WelcomeResult}.
    * The SDK stashes this alongside {@link Session.id} to rejoin via
    * `tesseron/resume` after a transport drop. Rotated on every successful
