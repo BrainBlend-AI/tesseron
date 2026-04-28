@@ -1,0 +1,19 @@
+{
+  "name": "tesseron",
+  "interface": {
+    "displayName": "Tesseron Plugins"
+  },
+  "plugins": [
+    {
+      "name": "tesseron",
+      "source": {
+        "source": "local",
+        "path": "../../plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Integration"
+    }
+  ]
+}
