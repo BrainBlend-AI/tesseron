@@ -126,6 +126,44 @@ export interface AgentCapabilityInfo {
 }
 
 /**
+ * One entry returned by {@link TesseronGateway.getPendingClaims}: a claim
+ * code the gateway can currently redeem, plus enough metadata for an agent
+ * to pick the right one. The MCP bridge serialises these as the body of
+ * `tesseron__list_pending_claims`. See tesseron#69.
+ */
+export interface PendingClaim {
+  /** 6-character pairing code in the `XXXX-XX` format. Pass to `tesseron__claim_session({ code })`. */
+  code: string;
+  /**
+   * App identifier. For gateway-minted claims this is `session.app.id` (matches
+   * the prefix on per-app MCP tools, e.g. `<appId>__<action>`). For host-minted
+   * claims this is best-effort: the cached real `app.id` if this SDK has bound
+   * before in this gateway process, otherwise the manifest's filesystem-friendly
+   * `appName`. Authoritative parity only after the first successful bind.
+   */
+  appId: string;
+  /** Human-readable display name. Falls back to {@link appId} for host-minted entries. */
+  appName: string;
+  /** Unix-millis when the gateway (or host) minted the code. */
+  mintedAt: number;
+  /**
+   * Which mint flow produced this claim. `gateway-minted` is the pre-host-mint
+   * fallback used when the SDK doesn't set `helloHandledByHost` (still active in
+   * v2 — every legacy SDK bridges through this path).
+   */
+  source: 'gateway-minted' | 'host-minted';
+  /** Unix-millis sliding TTL deadline; only present for host-minted claims that advertised one. */
+  expiresAt?: number;
+  /**
+   * Manifest-side instance identifier. Only set for host-minted entries — lets
+   * an agent disambiguate two SDKs that happen to share an `appName` (e.g. two
+   * worktrees of the same package running side-by-side). Per tesseron#69's
+   * suggested shape.
+   */
+  instanceId?: string;
+}
+
+/**
  * Operational event the gateway emits as `'gateway-log'` so an MCP bridge can
  * forward it to the connected agent via `notifications/message` (MCP
  * `sendLoggingMessage`). Solves the "user has to grep ~/.claude/" problem
@@ -179,6 +217,8 @@ interface ZombieSession {
   claimCode: string;
   claimed: boolean;
   claimedAt?: number;
+  /** Original session mintedAt, preserved across resume so the resumed session reports its true age. */
+  mintedAt: number;
   /** Timer that removes this zombie from {@link TesseronGateway.zombieSessions} once the TTL elapses. */
   evictTimer: ReturnType<typeof setTimeout>;
 }
@@ -238,6 +278,22 @@ export class TesseronGateway extends EventEmitter {
     string,
     { resolve: (s: Session) => void; reject: (err: Error) => void }
   >();
+  /**
+   * Cache mapping a host-minted manifest's `appName` (filesystem-friendly,
+   * usually the package name — e.g. `"react-todo"`) to the SDK-side `app.id`
+   * (the prefix on per-app MCP tools — e.g. `"todos"`). Populated in the
+   * host-mint hello handler when the SDK reports its real `app.id`. Used by
+   * {@link getPendingClaims} so a post-recovery list surfaces the same
+   * `app_id` an agent would see on per-app tool names; lets the agent's
+   * `<app_id>__<action>` cache match the new pending entry without a user
+   * round-trip. Lives for the gateway process — a stale entry only costs
+   * the agent a one-shot wrong app_id, which still recovers because
+   * `tesseron__claim_session` keys off the code, not the app id. Two SDKs
+   * with the same `appName` (e.g. two worktrees of the same package) will
+   * stomp each other's entry; the `instanceId` field on `PendingClaim`
+   * gives the agent a disambiguator. See tesseron#69.
+   */
+  private readonly manifestAppNameToAppId = new Map<string, string>();
 
   constructor(private readonly options: GatewayOptions = {}) {
     super();
@@ -601,6 +657,79 @@ export class TesseronGateway extends EventEmitter {
   /** Sessions that have completed `tesseron/hello` but are waiting for a claim code. */
   getPendingSessions(): Session[] {
     return Array.from(this.sessions.values()).filter((s) => !s.claimed);
+  }
+
+  /**
+   * Snapshot of every claim code the gateway can currently redeem. Combines:
+   *
+   * - **Gateway-minted:** sessions that completed `tesseron/hello` but
+   *   haven't been claimed yet — entries from {@link pendingClaims} joined
+   *   to their {@link Session} for app metadata.
+   * - **Host-minted (`@tesseron/vite` / `@tesseron/server` host-mint):**
+   *   manifests under `~/.tesseron/instances/` with `helloHandledByHost: true`
+   *   and a `hostMintedClaim` whose `boundAgent` is `null` and whose
+   *   `expiresAt` (when present) hasn't elapsed.
+   *
+   * Surfaced through the MCP bridge as `tesseron__list_pending_claims` so an
+   * agent whose previously-claimed session was invalidated (browser refresh,
+   * dev-server reload, resume failure) can self-discover the new claim code
+   * instead of asking the user to read it from the app UI. See tesseron#69.
+   */
+  getPendingClaims(): PendingClaim[] {
+    const out: PendingClaim[] = [];
+    for (const [code, sessionId] of this.pendingClaims) {
+      const session = this.sessions.get(sessionId);
+      if (!session) continue;
+      out.push({
+        code,
+        appId: session.app.id,
+        appName: session.app.name,
+        mintedAt: session.mintedAt,
+        source: 'gateway-minted',
+      });
+    }
+    const now = Date.now();
+    for (const manifest of this.hostMintedInstances.values()) {
+      const minted = manifest.hostMintedClaim;
+      if (!minted) continue;
+      // Filter out claims the host has already consumed or let expire — both
+      // would fail at `claimSession` time anyway, so listing them just sends
+      // the agent down a dead-end.
+      if (minted.boundAgent !== null) continue;
+      // `Number.isFinite` rejects NaN/Infinity from a malformed manifest so
+      // the downstream `new Date(expiresAt).toISOString()` in the bridge
+      // can't throw RangeError on an out-of-range value the `< now`
+      // comparison would silently let through (NaN < now is `false`).
+      if (
+        minted.expiresAt !== undefined &&
+        (!Number.isFinite(minted.expiresAt) || minted.expiresAt < now)
+      ) {
+        continue;
+      }
+      if (!Number.isFinite(minted.mintedAt)) continue;
+      // The manifest only carries `appName` (the filesystem-friendly
+      // identifier — usually the package name, e.g. "react-todo"). The
+      // agent-visible app id (the prefix on per-app tools, e.g. "todos")
+      // only arrives at the host-mint hello/bind. Prefer the cached
+      // mapping when we've seen this SDK before, so the agent's
+      // `<app_id>__<action>` cache matches the entry without a user
+      // round-trip. Fall back to the manifest's appName for the
+      // first-ever claim (no prior bind has populated the cache).
+      const cachedAppId = this.manifestAppNameToAppId.get(manifest.appName);
+      out.push({
+        code: minted.code,
+        appId: cachedAppId ?? manifest.appName,
+        appName: manifest.appName,
+        mintedAt: minted.mintedAt,
+        source: 'host-minted',
+        instanceId: manifest.instanceId,
+        ...(minted.expiresAt !== undefined ? { expiresAt: minted.expiresAt } : {}),
+      });
+    }
+    // Sort by mintedAt descending so the newest claim — usually what the
+    // recovering agent wants — is first.
+    out.sort((a, b) => b.mintedAt - a.mintedAt);
+    return out;
   }
 
   /**
@@ -994,6 +1123,7 @@ export class TesseronGateway extends EventEmitter {
           claimCode: closedSession.claimCode,
           claimed: closedSession.claimed,
           claimedAt: closedSession.claimedAt,
+          mintedAt: closedSession.mintedAt,
           evictTimer,
         });
       }
@@ -1078,9 +1208,27 @@ export class TesseronGateway extends EventEmitter {
           claimCode: bindContext.code,
           claimed: true,
           claimedAt,
+          mintedAt: claimedAt,
           resumeToken,
         };
         this.sessions.set(sessionId, session);
+        // Remember the manifest-appName → real app.id mapping so a future
+        // pending-claim discovery for the same SDK process (after a refresh
+        // / dev-server reload) can report the agent-visible app id rather
+        // than the filesystem-friendly manifest name. See tesseron#69.
+        const boundManifest = this.hostMintedInstances.get(bindContext.instanceId);
+        if (boundManifest) {
+          this.manifestAppNameToAppId.set(boundManifest.appName, helloParams.app.id);
+        } else {
+          // Manifest already evicted between claimSession's lookup and the
+          // bind hello firing (TTL race or concurrent delete). The agent
+          // recovery flow falls back to reporting the manifest's appName
+          // on next list_pending_claims; visible here so an operator
+          // chasing wrong-app-id reports knows where to look.
+          logToStderr(
+            `[tesseron] cache miss: host-mint manifest for instance ${bindContext.instanceId} evicted before bind handler ran — manifestAppName→appId mapping skipped`,
+          );
+        }
         logToStderr(
           `[tesseron] host-mint session "${helloParams.app.name}" (${sessionId}) — bound to claim code ${bindContext.code}`,
         );
@@ -1145,6 +1293,7 @@ export class TesseronGateway extends EventEmitter {
       const sessionId = generateSessionId();
       const resumeToken = generateResumeToken();
       const claimCode = generateClaimCode();
+      const mintedAt = Date.now();
       session = {
         id: sessionId,
         app: helloParams.app,
@@ -1155,6 +1304,7 @@ export class TesseronGateway extends EventEmitter {
         capabilities: helloParams.capabilities,
         claimCode,
         claimed: false,
+        mintedAt,
         resumeToken,
       };
       this.sessions.set(sessionId, session);
@@ -1174,7 +1324,7 @@ export class TesseronGateway extends EventEmitter {
         appId: helloParams.app.id,
         appName: helloParams.app.name,
         gatewayPid: process.pid,
-        mintedAt: Date.now(),
+        mintedAt,
       });
       logToStderr(
         `[tesseron] new session "${helloParams.app.name}" (${sessionId}) — claim code: ${claimCode}`,
@@ -1330,6 +1480,7 @@ export class TesseronGateway extends EventEmitter {
         claimCode: zombie.claimCode,
         claimed: zombie.claimed,
         claimedAt: zombie.claimedAt,
+        mintedAt: zombie.mintedAt,
         resumeToken: rotatedResumeToken,
       };
       this.sessions.set(zombie.id, session);

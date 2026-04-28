@@ -22,6 +22,7 @@ import { assertValidElicitSchema } from '@tesseron/core/internal';
 import type {
   ForeignClaim,
   GatewayLogEvent,
+  PendingClaim,
   ResourceSubscription,
   TesseronGateway,
 } from './gateway.js';
@@ -31,9 +32,18 @@ const META_TOOL_CLAIM_SESSION = 'tesseron__claim_session';
 const META_TOOL_LIST_ACTIONS = 'tesseron__list_actions';
 const META_TOOL_INVOKE_ACTION = 'tesseron__invoke_action';
 const META_TOOL_READ_RESOURCE = 'tesseron__read_resource';
+const META_TOOL_LIST_PENDING_CLAIMS = 'tesseron__list_pending_claims';
 const PREFIX_SEPARATOR = '__';
 const RESOURCE_SCHEME = 'tesseron:';
 const DEFAULT_SERVER_NAME = 'tesseron';
+/**
+ * Cap on the number of pending claims inlined in `tesseron__claim_session`'s
+ * "no pending session" error body. Bounds the error string in multi-app dev
+ * workflows so a typo on one app doesn't dump every other claim's metadata
+ * (and so MCP clients that truncate long messages still see something useful).
+ * The agent gets the full list via `tesseron__list_pending_claims`.
+ */
+const PENDING_CLAIM_PREVIEW_MAX = 3;
 
 const CLAIM_TOOL = {
   name: META_TOOL_CLAIM_SESSION,
@@ -112,6 +122,16 @@ const META_DISPATCHER_TOOLS = [
         },
       },
       required: ['app_id', 'name'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: META_TOOL_LIST_PENDING_CLAIMS,
+    description:
+      'List every claim code the gateway can currently redeem (gateway-minted sessions waiting for claim, plus host-minted manifests with an unconsumed code). Recovery path when a previously-claimed session was invalidated mid-conversation (browser refresh, dev-server reload, resume failure) and tools/call returns "No claimed session found": call this, pick the entry whose app_id matches, then call tesseron__claim_session({ code }) to re-pair without asking the user to read the new code from the app UI. Returns an empty list when no claim is pending — in that case, ask the user to reload the app.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -345,6 +365,9 @@ export class McpAgentBridge {
       if (name === META_TOOL_LIST_ACTIONS) {
         return this.handleListActions();
       }
+      if (name === META_TOOL_LIST_PENDING_CLAIMS) {
+        return this.handleListPendingClaims();
+      }
       if (name === META_TOOL_READ_RESOURCE) {
         return this.handleReadResource(args);
       }
@@ -377,7 +400,7 @@ export class McpAgentBridge {
       }
       const session = this.latestClaimedByApp(appId);
       if (!session) {
-        return errorResult(`No claimed session found for app "${appId}".`);
+        return errorResult(this.noClaimedSessionMessage(appId));
       }
 
       if (progressToken !== undefined) {
@@ -582,6 +605,94 @@ export class McpAgentBridge {
     };
   }
 
+  /**
+   * Build the body of `tesseron__list_pending_claims`. Each entry has the
+   * shape an agent needs to call `tesseron__claim_session({ code })` next:
+   * the code itself, the app id (matches the `<app_id>__<action>` tool
+   * prefix), the human display name, the source mint flow, and the unix
+   * timestamps for filtering. The empty-list branch returns advisory text
+   * — strict programmatic agents key off `pending_claims.length` while
+   * looser ones still get a helpful instruction. See tesseron#69.
+   */
+  private handleListPendingClaims(): {
+    content: Array<{ type: 'text'; text: string }>;
+  } {
+    const claims = this.gateway.getPendingClaims();
+    if (claims.length === 0) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'No pending claims. The gateway has nothing to redeem right now — ask the user to (re)open the app and read the new claim code from its UI, then call tesseron__claim_session({ code }).',
+          },
+        ],
+      };
+    }
+    const payload = {
+      pending_claims: claims.map((c) => ({
+        code: c.code,
+        app_id: c.appId,
+        app_name: c.appName,
+        minted_at: c.mintedAt,
+        minted_at_iso: new Date(c.mintedAt).toISOString(),
+        source: c.source,
+        ...(c.instanceId !== undefined ? { instance_id: c.instanceId } : {}),
+        ...(c.expiresAt !== undefined
+          ? { expires_at: c.expiresAt, expires_at_iso: new Date(c.expiresAt).toISOString() }
+          : {}),
+      })),
+      next_step:
+        'Pick the entry whose app_id matches the app you were operating on, then call tesseron__claim_session({ code }) with its code. If multiple entries match, prefer the one with the largest minted_at.',
+    };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Recovery hint surfaced when an action / resource call lands on an
+   * `appId` that has no claimed session — the most common cause is that
+   * the prior session was invalidated mid-conversation (browser tab
+   * refresh, dev-server reload, `tesseron/resume` failure) and the agent
+   * still holds the cached app id from before. See tesseron#69.
+   *
+   * Wrapped in try/catch so a malformed manifest that would otherwise
+   * crash {@link TesseronGateway.getPendingClaims} still leaves the agent
+   * with the original "no claimed session" hint instead of swallowing it
+   * inside a JSON-RPC InternalError.
+   */
+  private noClaimedSessionMessage(appId: string): string {
+    let pending: ReturnType<TesseronGateway['getPendingClaims']> = [];
+    try {
+      pending = this.gateway.getPendingClaims();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      void this.server
+        .sendLoggingMessage({
+          level: 'warning',
+          logger: 'tesseron.recovery',
+          data: {
+            message: `pending-claims enrichment failed while building no-claimed-session error: ${reason}`,
+          },
+        })
+        .catch(() => {});
+    }
+    const matching = pending.filter((c) => c.appId === appId);
+    if (matching.length > 0) {
+      const codes = matching.map((c) => c.code).join(', ');
+      return `No claimed session found for app "${appId}". The previous session was likely lost (browser refresh, dev-server reload, or a tesseron/resume failure) and a fresh code is now pending: ${codes}. Call ${META_TOOL_CLAIM_SESSION}({ code: "<one of these>" }) to re-pair, then retry.`;
+    }
+    if (pending.length > 0) {
+      return `No claimed session found for app "${appId}". The previous session was likely lost (browser refresh, dev-server reload, or a tesseron/resume failure). The gateway has ${pending.length} pending claim(s) for other apps — call ${META_TOOL_LIST_PENDING_CLAIMS} to see them, or ask the user to reload "${appId}" and read its new claim code from the app UI.`;
+    }
+    return `No claimed session found for app "${appId}". The previous session was likely lost (browser refresh, dev-server reload, or a tesseron/resume failure) and no pending claim is waiting. Ask the user to reload the app, then call ${META_TOOL_CLAIM_SESSION}({ code }) with the new claim code shown in the app UI. ${META_TOOL_LIST_PENDING_CLAIMS} returns any newly-pending claims if the user reloads while you wait.`;
+  }
+
   private async handleReadResource(args: Record<string, unknown>): Promise<{
     content: Array<{ type: 'text'; text: string }>;
     isError?: boolean;
@@ -595,7 +706,7 @@ export class McpAgentBridge {
     }
     const session = this.latestClaimedByApp(appId);
     if (!session) {
-      return errorResult(`No claimed session found for app "${appId}".`);
+      return errorResult(this.noClaimedSessionMessage(appId));
     }
     if (!session.resources.some((r) => r.name === resourceName)) {
       return errorResult(
@@ -652,8 +763,43 @@ export class McpAgentBridge {
           `Claim code "${code.toUpperCase()}" was minted at ${minted} by gateway pid ${foreign.gatewayPid}, which is no longer running. Have the web app reconnect to mint a fresh code, then claim that one.`,
         );
       }
+      // Surface the live pending claims so an agent retrying with a stale
+      // cached code (post-#69 recovery path) can self-correct without a
+      // user round-trip. Cap the inlined list at PENDING_CLAIM_PREVIEW_MAX
+      // so a multi-app dev workflow doesn't bloat the error string (and
+      // direct the agent at the meta tool for the rest). Wrap in try/catch
+      // so a malformed manifest can't escalate this user error into an
+      // opaque internal one.
+      let pending: PendingClaim[] = [];
+      try {
+        pending = this.gateway.getPendingClaims();
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        void this.server
+          .sendLoggingMessage({
+            level: 'warning',
+            logger: 'tesseron.recovery',
+            data: {
+              message: `pending-claims enrichment failed while building no-pending-session error: ${reason}`,
+            },
+          })
+          .catch(() => {});
+      }
+      if (pending.length > 0) {
+        const preview = pending.slice(0, PENDING_CLAIM_PREVIEW_MAX);
+        const summary = preview
+          .map((c) => `"${c.code}" (app "${c.appId}", source ${c.source})`)
+          .join('; ');
+        const overflowSuffix =
+          pending.length > preview.length
+            ? ` (showing the ${preview.length} most-recent of ${pending.length}; call ${META_TOOL_LIST_PENDING_CLAIMS} for the full list)`
+            : '';
+        return errorResult(
+          `No pending session found for code "${code}". The gateway currently has ${pending.length} other pending claim(s): ${summary}${overflowSuffix}. If the user typed the wrong code, retry with one of those.`,
+        );
+      }
       return errorResult(
-        `No pending session found for code "${code}". Has the web app connected, and is the code current?`,
+        `No pending session found for code "${code}". Has the web app connected, and is the code current? Call ${META_TOOL_LIST_PENDING_CLAIMS} to see what the gateway currently has pending; if empty, ask the user to reload the app.`,
       );
     }
     const toolNames = session.actions.map((a) => `${session.app.id}${PREFIX_SEPARATOR}${a.name}`);
