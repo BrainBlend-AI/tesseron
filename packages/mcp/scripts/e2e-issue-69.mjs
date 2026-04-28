@@ -20,6 +20,7 @@
  * pending instance.
  */
 
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -32,6 +33,13 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../..');
 const bundle = resolve(repoRoot, 'plugin/server/index.cjs');
+
+if (!existsSync(bundle)) {
+  console.error(
+    `[e2e] gateway bundle not found at ${bundle}. Run \`pnpm build:plugin\` from the repo root first.`,
+  );
+  process.exit(1);
+}
 
 console.log(`[e2e] gateway bundle: ${bundle}`);
 
@@ -173,6 +181,14 @@ try {
   console.error('[e2e] uncaught error:', err);
   process.exit(1);
 } finally {
-  await client.close().catch(() => {});
-  transport.close().catch(() => {});
+  // Surface cleanup errors as warnings instead of swallowing them — a wedged
+  // gateway or half-closed stdio pipe is worth knowing about even after the
+  // checks pass. Don't flip the exit code: the test result itself is the
+  // contract this script reports.
+  await client
+    .close()
+    .catch((e) => console.warn('[e2e] client.close failed:', e instanceof Error ? e.message : e));
+  await Promise.resolve(transport.close()).catch((e) =>
+    console.warn('[e2e] transport.close failed:', e instanceof Error ? e.message : e),
+  );
 }

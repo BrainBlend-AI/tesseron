@@ -19504,14 +19504,17 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
   /**
    * Cache mapping a host-minted manifest's `appName` (filesystem-friendly,
    * usually the package name — e.g. `"react-todo"`) to the SDK-side `app.id`
-   * (the prefix on per-app MCP tools — e.g. `"todos"`) learned at v3 bind
-   * time. Used by {@link getPendingClaims} so a post-recovery list surfaces
-   * the same `app_id` an agent would see on per-app tool names; lets the
-   * agent's `<app_id>__<action>` cache match the new pending entry without
-   * a user round-trip. Lives for the gateway process — a stale entry only
-   * costs the agent a one-shot wrong app_id, which still recovers because
-   * `tesseron__claim_session` keys off the code, not the app id. See
-   * tesseron#69.
+   * (the prefix on per-app MCP tools — e.g. `"todos"`). Populated in the
+   * host-mint hello handler when the SDK reports its real `app.id`. Used by
+   * {@link getPendingClaims} so a post-recovery list surfaces the same
+   * `app_id` an agent would see on per-app tool names; lets the agent's
+   * `<app_id>__<action>` cache match the new pending entry without a user
+   * round-trip. Lives for the gateway process — a stale entry only costs
+   * the agent a one-shot wrong app_id, which still recovers because
+   * `tesseron__claim_session` keys off the code, not the app id. Two SDKs
+   * with the same `appName` (e.g. two worktrees of the same package) will
+   * stomp each other's entry; the `instanceId` field on `PendingClaim`
+   * gives the agent a disambiguator. See tesseron#69.
    */
   manifestAppNameToAppId = /* @__PURE__ */ new Map();
   /**
@@ -19791,10 +19794,10 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
   /**
    * Snapshot of every claim code the gateway can currently redeem. Combines:
    *
-   * - **Gateway-minted (legacy):** sessions that completed `tesseron/hello`
-   *   but haven't been claimed yet — entries from {@link pendingClaims}
-   *   joined to their {@link Session} for app metadata.
-   * - **Host-minted (`@tesseron/vite@2.2.0+` / `@tesseron/server` host-mint):**
+   * - **Gateway-minted:** sessions that completed `tesseron/hello` but
+   *   haven't been claimed yet — entries from {@link pendingClaims} joined
+   *   to their {@link Session} for app metadata.
+   * - **Host-minted (`@tesseron/vite` / `@tesseron/server` host-mint):**
    *   manifests under `~/.tesseron/instances/` with `helloHandledByHost: true`
    *   and a `hostMintedClaim` whose `boundAgent` is `null` and whose
    *   `expiresAt` (when present) hasn't elapsed.
@@ -19822,7 +19825,10 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
       const minted = manifest.hostMintedClaim;
       if (!minted) continue;
       if (minted.boundAgent !== null) continue;
-      if (minted.expiresAt !== void 0 && minted.expiresAt < now) continue;
+      if (minted.expiresAt !== void 0 && (!Number.isFinite(minted.expiresAt) || minted.expiresAt < now)) {
+        continue;
+      }
+      if (!Number.isFinite(minted.mintedAt)) continue;
       const cachedAppId = this.manifestAppNameToAppId.get(manifest.appName);
       out.push({
         code: minted.code,
@@ -19830,6 +19836,7 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
         appName: manifest.appName,
         mintedAt: minted.mintedAt,
         source: "host-minted",
+        instanceId: manifest.instanceId,
         ...minted.expiresAt !== void 0 ? { expiresAt: minted.expiresAt } : {}
       });
     }
@@ -20186,6 +20193,10 @@ var TesseronGateway = class extends import_node_events.EventEmitter {
         const boundManifest = this.hostMintedInstances.get(bindContext.instanceId);
         if (boundManifest) {
           this.manifestAppNameToAppId.set(boundManifest.appName, helloParams.app.id);
+        } else {
+          logToStderr(
+            `[tesseron] cache miss: host-mint manifest for instance ${bindContext.instanceId} evicted before bind handler ran \u2014 manifestAppName\u2192appId mapping skipped`
+          );
         }
         logToStderr(
           `[tesseron] host-mint session "${helloParams.app.name}" (${sessionId2}) \u2014 bound to claim code ${bindContext.code}`
@@ -26133,6 +26144,7 @@ var META_TOOL_LIST_PENDING_CLAIMS = "tesseron__list_pending_claims";
 var PREFIX_SEPARATOR = "__";
 var RESOURCE_SCHEME = "tesseron:";
 var DEFAULT_SERVER_NAME = "tesseron";
+var PENDING_CLAIM_PREVIEW_MAX = 3;
 var CLAIM_TOOL = {
   name: META_TOOL_CLAIM_SESSION,
   description: 'Claim a pending Tesseron session by its 6-character code (format: XXXX-XX) so its actions appear as MCP tools. Web apps display this code in their UI when the user clicks "Connect Claude".',
@@ -26615,6 +26627,7 @@ var McpAgentBridge = class {
         minted_at: c.mintedAt,
         minted_at_iso: new Date(c.mintedAt).toISOString(),
         source: c.source,
+        ...c.instanceId !== void 0 ? { instance_id: c.instanceId } : {},
         ...c.expiresAt !== void 0 ? { expires_at: c.expiresAt, expires_at_iso: new Date(c.expiresAt).toISOString() } : {}
       })),
       next_step: `Pick the entry whose app_id matches the app you were operating on, then call tesseron__claim_session({ code }) with its code. If multiple entries match, prefer the one with the largest minted_at.`
@@ -26633,15 +26646,32 @@ var McpAgentBridge = class {
    * `appId` that has no claimed session — the most common cause is that
    * the prior session was invalidated mid-conversation (browser tab
    * refresh, dev-server reload, `tesseron/resume` failure) and the agent
-   * still holds the cached app id from before. Mentions the recovery
-   * tool by name so the agent doesn't have to guess. See tesseron#69.
+   * still holds the cached app id from before. See tesseron#69.
+   *
+   * Wrapped in try/catch so a malformed manifest that would otherwise
+   * crash {@link TesseronGateway.getPendingClaims} still leaves the agent
+   * with the original "no claimed session" hint instead of swallowing it
+   * inside a JSON-RPC InternalError.
    */
   noClaimedSessionMessage(appId) {
-    const pending = this.gateway.getPendingClaims();
+    let pending = [];
+    try {
+      pending = this.gateway.getPendingClaims();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      void this.server.sendLoggingMessage({
+        level: "warning",
+        logger: "tesseron.recovery",
+        data: {
+          message: `pending-claims enrichment failed while building no-claimed-session error: ${reason}`
+        }
+      }).catch(() => {
+      });
+    }
     const matching = pending.filter((c) => c.appId === appId);
     if (matching.length > 0) {
       const codes = matching.map((c) => c.code).join(", ");
-      return `No claimed session found for app "${appId}". The previous session was likely lost (browser refresh, dev-server reload, or a tesseron/resume failure) and a fresh code is now pending: ${codes}. Call ${META_TOOL_CLAIM_SESSION}({ code: "<one of these>" }) to re-pair, then retry. ${META_TOOL_LIST_PENDING_CLAIMS} returns the same data with timestamps.`;
+      return `No claimed session found for app "${appId}". The previous session was likely lost (browser refresh, dev-server reload, or a tesseron/resume failure) and a fresh code is now pending: ${codes}. Call ${META_TOOL_CLAIM_SESSION}({ code: "<one of these>" }) to re-pair, then retry.`;
     }
     if (pending.length > 0) {
       return `No claimed session found for app "${appId}". The previous session was likely lost (browser refresh, dev-server reload, or a tesseron/resume failure). The gateway has ${pending.length} pending claim(s) for other apps \u2014 call ${META_TOOL_LIST_PENDING_CLAIMS} to see them, or ask the user to reload "${appId}" and read its new claim code from the app UI.`;
@@ -26700,11 +26730,26 @@ var McpAgentBridge = class {
           `Claim code "${code.toUpperCase()}" was minted at ${minted} by gateway pid ${foreign.gatewayPid}, which is no longer running. Have the web app reconnect to mint a fresh code, then claim that one.`
         );
       }
-      const pending = this.gateway.getPendingClaims();
+      let pending = [];
+      try {
+        pending = this.gateway.getPendingClaims();
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        void this.server.sendLoggingMessage({
+          level: "warning",
+          logger: "tesseron.recovery",
+          data: {
+            message: `pending-claims enrichment failed while building no-pending-session error: ${reason}`
+          }
+        }).catch(() => {
+        });
+      }
       if (pending.length > 0) {
-        const summary = pending.map((c) => `"${c.code}" (app "${c.appId}", source ${c.source})`).join("; ");
+        const preview = pending.slice(0, PENDING_CLAIM_PREVIEW_MAX);
+        const summary = preview.map((c) => `"${c.code}" (app "${c.appId}", source ${c.source})`).join("; ");
+        const overflowSuffix = pending.length > preview.length ? ` (showing the ${preview.length} most-recent of ${pending.length}; call ${META_TOOL_LIST_PENDING_CLAIMS} for the full list)` : "";
         return errorResult(
-          `No pending session found for code "${code}". The gateway currently has ${pending.length} other pending claim(s): ${summary}. If the user typed the wrong code, retry with one of those. ${META_TOOL_LIST_PENDING_CLAIMS} returns the same data with timestamps.`
+          `No pending session found for code "${code}". The gateway currently has ${pending.length} other pending claim(s): ${summary}${overflowSuffix}. If the user typed the wrong code, retry with one of those.`
         );
       }
       return errorResult(

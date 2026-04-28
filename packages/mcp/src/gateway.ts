@@ -135,21 +135,32 @@ export interface PendingClaim {
   /** 6-character pairing code in the `XXXX-XX` format. Pass to `tesseron__claim_session({ code })`. */
   code: string;
   /**
-   * App identifier. For gateway-minted claims this is `session.app.id`
-   * (matches the prefix on per-app MCP tools, e.g. `<appId>__<action>`).
-   * For host-minted claims, this is the manifest's `appName` field — in
-   * practice the same string, but the host hasn't sent `tesseron/hello`
-   * yet so the gateway can't promise authoritative parity until binding.
+   * App identifier. For gateway-minted claims this is `session.app.id` (matches
+   * the prefix on per-app MCP tools, e.g. `<appId>__<action>`). For host-minted
+   * claims this is best-effort: the cached real `app.id` if this SDK has bound
+   * before in this gateway process, otherwise the manifest's filesystem-friendly
+   * `appName`. Authoritative parity only after the first successful bind.
    */
   appId: string;
   /** Human-readable display name. Falls back to {@link appId} for host-minted entries. */
   appName: string;
   /** Unix-millis when the gateway (or host) minted the code. */
   mintedAt: number;
-  /** Which mint flow produced this claim — gateway-minted is the legacy v1.1 path. */
+  /**
+   * Which mint flow produced this claim. `gateway-minted` is the pre-host-mint
+   * fallback used when the SDK doesn't set `helloHandledByHost` (still active in
+   * v2 — every legacy SDK bridges through this path).
+   */
   source: 'gateway-minted' | 'host-minted';
   /** Unix-millis sliding TTL deadline; only present for host-minted claims that advertised one. */
   expiresAt?: number;
+  /**
+   * Manifest-side instance identifier. Only set for host-minted entries — lets
+   * an agent disambiguate two SDKs that happen to share an `appName` (e.g. two
+   * worktrees of the same package running side-by-side). Per tesseron#69's
+   * suggested shape.
+   */
+  instanceId?: string;
 }
 
 /**
@@ -270,14 +281,17 @@ export class TesseronGateway extends EventEmitter {
   /**
    * Cache mapping a host-minted manifest's `appName` (filesystem-friendly,
    * usually the package name — e.g. `"react-todo"`) to the SDK-side `app.id`
-   * (the prefix on per-app MCP tools — e.g. `"todos"`) learned at v3 bind
-   * time. Used by {@link getPendingClaims} so a post-recovery list surfaces
-   * the same `app_id` an agent would see on per-app tool names; lets the
-   * agent's `<app_id>__<action>` cache match the new pending entry without
-   * a user round-trip. Lives for the gateway process — a stale entry only
-   * costs the agent a one-shot wrong app_id, which still recovers because
-   * `tesseron__claim_session` keys off the code, not the app id. See
-   * tesseron#69.
+   * (the prefix on per-app MCP tools — e.g. `"todos"`). Populated in the
+   * host-mint hello handler when the SDK reports its real `app.id`. Used by
+   * {@link getPendingClaims} so a post-recovery list surfaces the same
+   * `app_id` an agent would see on per-app tool names; lets the agent's
+   * `<app_id>__<action>` cache match the new pending entry without a user
+   * round-trip. Lives for the gateway process — a stale entry only costs
+   * the agent a one-shot wrong app_id, which still recovers because
+   * `tesseron__claim_session` keys off the code, not the app id. Two SDKs
+   * with the same `appName` (e.g. two worktrees of the same package) will
+   * stomp each other's entry; the `instanceId` field on `PendingClaim`
+   * gives the agent a disambiguator. See tesseron#69.
    */
   private readonly manifestAppNameToAppId = new Map<string, string>();
 
@@ -648,10 +662,10 @@ export class TesseronGateway extends EventEmitter {
   /**
    * Snapshot of every claim code the gateway can currently redeem. Combines:
    *
-   * - **Gateway-minted (legacy):** sessions that completed `tesseron/hello`
-   *   but haven't been claimed yet — entries from {@link pendingClaims}
-   *   joined to their {@link Session} for app metadata.
-   * - **Host-minted (`@tesseron/vite@2.2.0+` / `@tesseron/server` host-mint):**
+   * - **Gateway-minted:** sessions that completed `tesseron/hello` but
+   *   haven't been claimed yet — entries from {@link pendingClaims} joined
+   *   to their {@link Session} for app metadata.
+   * - **Host-minted (`@tesseron/vite` / `@tesseron/server` host-mint):**
    *   manifests under `~/.tesseron/instances/` with `helloHandledByHost: true`
    *   and a `hostMintedClaim` whose `boundAgent` is `null` and whose
    *   `expiresAt` (when present) hasn't elapsed.
@@ -682,15 +696,25 @@ export class TesseronGateway extends EventEmitter {
       // would fail at `claimSession` time anyway, so listing them just sends
       // the agent down a dead-end.
       if (minted.boundAgent !== null) continue;
-      if (minted.expiresAt !== undefined && minted.expiresAt < now) continue;
-      // For host-minted entries the manifest only carries `appName` (the
-      // filesystem-friendly identifier — usually the package name, e.g.
-      // "react-todo"). The agent-visible app id (the prefix on per-app
-      // tools, e.g. "todos") only arrives at v3 bind time. Prefer the
-      // cached mapping when we've seen this SDK before, so the agent's
+      // `Number.isFinite` rejects NaN/Infinity from a malformed manifest so
+      // the downstream `new Date(expiresAt).toISOString()` in the bridge
+      // can't throw RangeError on an out-of-range value the `< now`
+      // comparison would silently let through (NaN < now is `false`).
+      if (
+        minted.expiresAt !== undefined &&
+        (!Number.isFinite(minted.expiresAt) || minted.expiresAt < now)
+      ) {
+        continue;
+      }
+      if (!Number.isFinite(minted.mintedAt)) continue;
+      // The manifest only carries `appName` (the filesystem-friendly
+      // identifier — usually the package name, e.g. "react-todo"). The
+      // agent-visible app id (the prefix on per-app tools, e.g. "todos")
+      // only arrives at the host-mint hello/bind. Prefer the cached
+      // mapping when we've seen this SDK before, so the agent's
       // `<app_id>__<action>` cache matches the entry without a user
-      // round-trip. Fall back to the manifest's appName when no prior
-      // bind has populated the cache (first-ever claim).
+      // round-trip. Fall back to the manifest's appName for the
+      // first-ever claim (no prior bind has populated the cache).
       const cachedAppId = this.manifestAppNameToAppId.get(manifest.appName);
       out.push({
         code: minted.code,
@@ -698,6 +722,7 @@ export class TesseronGateway extends EventEmitter {
         appName: manifest.appName,
         mintedAt: minted.mintedAt,
         source: 'host-minted',
+        instanceId: manifest.instanceId,
         ...(minted.expiresAt !== undefined ? { expiresAt: minted.expiresAt } : {}),
       });
     }
@@ -1194,6 +1219,15 @@ export class TesseronGateway extends EventEmitter {
         const boundManifest = this.hostMintedInstances.get(bindContext.instanceId);
         if (boundManifest) {
           this.manifestAppNameToAppId.set(boundManifest.appName, helloParams.app.id);
+        } else {
+          // Manifest already evicted between claimSession's lookup and the
+          // bind hello firing (TTL race or concurrent delete). The agent
+          // recovery flow falls back to reporting the manifest's appName
+          // on next list_pending_claims; visible here so an operator
+          // chasing wrong-app-id reports knows where to look.
+          logToStderr(
+            `[tesseron] cache miss: host-mint manifest for instance ${bindContext.instanceId} evicted before bind handler ran — manifestAppName→appId mapping skipped`,
+          );
         }
         logToStderr(
           `[tesseron] host-mint session "${helloParams.app.name}" (${sessionId}) — bound to claim code ${bindContext.code}`,
