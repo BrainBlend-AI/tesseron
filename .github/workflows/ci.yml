@@ -42,3 +42,9 @@ jobs:
       # the cheap fail signals (typecheck, lint) surface first.
       - name: Verify plugin manifests in sync with @tesseron/mcp
         run: pnpm sync-plugin-version --check
+
+      # The conformance fixtures are consumed by out-of-repo SDK ports, so a
+      # malformed one shows up as a failing implementation in someone else's
+      # repo rather than as a failure here.
+      - name: Validate conformance fixtures
+        run: pnpm conformance:validate

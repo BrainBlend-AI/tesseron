@@ -1,0 +1,73 @@
+{
+  "id": "handshake/hello-declares-manifest",
+  "title": "Action and resource manifests carry the documented descriptor shape",
+  "spec": "/protocol/handshake/",
+  "requires": [],
+  "fixture": {
+    "actions": [
+      {
+        "name": "add",
+        "description": "Add two numbers",
+        "returns": {
+          "sum": 3
+        }
+      }
+    ],
+    "resources": [
+      {
+        "name": "cart",
+        "description": "Current cart",
+        "subscribable": true,
+        "value": {
+          "items": []
+        }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "recv": {
+        "method": "tesseron/hello",
+        "id": "~capture:helloId",
+        "params": {
+          "actions": [
+            {
+              "name": "add",
+              "description": "~string",
+              "inputSchema": "~any"
+            }
+          ],
+          "resources": [
+            {
+              "name": "cart",
+              "description": "~string",
+              "subscribable": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "~ref:helloId",
+        "result": {
+          "sessionId": "s_conformance_0001",
+          "protocolVersion": "1.2.0",
+          "capabilities": {
+            "streaming": true,
+            "subscriptions": true,
+            "sampling": true,
+            "elicitation": true
+          },
+          "agent": {
+            "id": "agent_conformance",
+            "name": "conformance-runner"
+          },
+          "claimCode": "AB3X-7K",
+          "resumeToken": "rt_conformance_0001"
+        }
+      }
+    }
+  ]
+}

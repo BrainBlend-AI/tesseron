@@ -1,0 +1,39 @@
+{
+  "id": "handshake/protocol-major-mismatch",
+  "title": "A major-version mismatch is a hard reject the host surfaces rather than retries",
+  "spec": "/protocol/handshake/#protocol-version-mismatch",
+  "requires": [],
+  "fixture": {
+    "actions": [
+      {
+        "name": "ping",
+        "returns": {
+          "ok": true
+        }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "recv": {
+        "method": "tesseron/hello",
+        "id": "~capture:helloId"
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "~ref:helloId",
+        "error": {
+          "code": -32000,
+          "message": "Gateway speaks protocol 1.2.0; SDK sent 9.0.0. Major version mismatch - pin compatible package versions."
+        }
+      }
+    },
+    {
+      "expectClosed": true,
+      "timeoutMs": 2000,
+      "note": "Host must fail the connect. Re-sending hello on the same channel is a fail."
+    }
+  ]
+}

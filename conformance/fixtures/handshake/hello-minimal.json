@@ -1,0 +1,63 @@
+{
+  "id": "handshake/hello-minimal",
+  "title": "Host opens with a well-formed hello and accepts the welcome",
+  "spec": "/protocol/handshake/",
+  "requires": [],
+  "fixture": {
+    "actions": [
+      {
+        "name": "ping",
+        "returns": {
+          "ok": true
+        }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "recv": {
+        "jsonrpc": "2.0",
+        "id": "~capture:helloId",
+        "method": "tesseron/hello",
+        "params": {
+          "protocolVersion": "~regex:^1\\.[0-9]+\\.[0-9]+$",
+          "app": {
+            "id": "~regex:^[a-z][a-z0-9_]*$",
+            "name": "~string",
+            "origin": "~string"
+          },
+          "actions": "~array",
+          "resources": "~array",
+          "capabilities": {
+            "streaming": "~boolean",
+            "subscriptions": "~boolean",
+            "sampling": "~boolean",
+            "elicitation": "~boolean"
+          }
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "~ref:helloId",
+        "result": {
+          "sessionId": "s_conformance_0001",
+          "protocolVersion": "1.2.0",
+          "capabilities": {
+            "streaming": true,
+            "subscriptions": true,
+            "sampling": true,
+            "elicitation": true
+          },
+          "agent": {
+            "id": "agent_conformance",
+            "name": "conformance-runner"
+          },
+          "claimCode": "AB3X-7K",
+          "resumeToken": "rt_conformance_0001"
+        }
+      }
+    }
+  ]
+}

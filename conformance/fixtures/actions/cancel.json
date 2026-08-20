@@ -1,0 +1,96 @@
+{
+  "id": "actions/cancel",
+  "title": "actions/cancel aborts the handler and answers -32001",
+  "spec": "/protocol/progress-cancellation/",
+  "requires": [],
+  "fixture": {
+    "actions": [
+      {
+        "name": "slow",
+        "blocksUntilCancelled": true,
+        "returns": {
+          "done": true
+        }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "recv": {
+        "jsonrpc": "2.0",
+        "id": "~capture:helloId",
+        "method": "tesseron/hello",
+        "params": {
+          "protocolVersion": "~regex:^1\\.[0-9]+\\.[0-9]+$",
+          "app": {
+            "id": "~regex:^[a-z][a-z0-9_]*$",
+            "name": "~string",
+            "origin": "~string"
+          },
+          "actions": "~array",
+          "resources": "~array",
+          "capabilities": {
+            "streaming": "~boolean",
+            "subscriptions": "~boolean",
+            "sampling": "~boolean",
+            "elicitation": "~boolean"
+          }
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "~ref:helloId",
+        "result": {
+          "sessionId": "s_conformance_0001",
+          "protocolVersion": "1.2.0",
+          "capabilities": {
+            "streaming": true,
+            "subscriptions": true,
+            "sampling": true,
+            "elicitation": true
+          },
+          "agent": {
+            "id": "agent_conformance",
+            "name": "conformance-runner"
+          },
+          "claimCode": "AB3X-7K",
+          "resumeToken": "rt_conformance_0001"
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "inv-1",
+        "method": "actions/invoke",
+        "params": {
+          "name": "slow",
+          "input": {},
+          "invocationId": "i-1"
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "method": "actions/cancel",
+        "params": {
+          "invocationId": "i-1"
+        }
+      }
+    },
+    {
+      "recv": {
+        "jsonrpc": "2.0",
+        "id": "inv-1",
+        "error": {
+          "code": -32001,
+          "message": "~string"
+        }
+      },
+      "note": "Cancel is a notification and carries no id; the error attaches to the invoke request."
+    }
+  ]
+}

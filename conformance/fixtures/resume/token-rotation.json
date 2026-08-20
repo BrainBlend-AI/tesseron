@@ -1,0 +1,136 @@
+{
+  "id": "resume/token-rotation",
+  "title": "Resume rotates the token and issues no new claim code",
+  "spec": "/protocol/resume/",
+  "requires": ["resume"],
+  "fixture": {
+    "actions": [
+      {
+        "name": "ping",
+        "returns": {
+          "ok": true
+        }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "recv": {
+        "jsonrpc": "2.0",
+        "id": "~capture:helloId",
+        "method": "tesseron/hello",
+        "params": {
+          "protocolVersion": "~regex:^1\\.[0-9]+\\.[0-9]+$",
+          "app": {
+            "id": "~regex:^[a-z][a-z0-9_]*$",
+            "name": "~string",
+            "origin": "~string"
+          },
+          "actions": "~array",
+          "resources": "~array",
+          "capabilities": {
+            "streaming": "~boolean",
+            "subscriptions": "~boolean",
+            "sampling": "~boolean",
+            "elicitation": "~boolean"
+          }
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "~ref:helloId",
+        "result": {
+          "sessionId": "s_conformance_0001",
+          "protocolVersion": "1.2.0",
+          "capabilities": {
+            "streaming": true,
+            "subscriptions": true,
+            "sampling": true,
+            "elicitation": true
+          },
+          "agent": {
+            "id": "agent_conformance",
+            "name": "conformance-runner"
+          },
+          "claimCode": "AB3X-7K",
+          "resumeToken": "rt_conformance_0001"
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "method": "tesseron/claimed",
+        "params": {
+          "agent": {
+            "id": "agent_conformance",
+            "name": "conformance-runner"
+          },
+          "claimedAt": 1714145210123
+        }
+      }
+    },
+    {
+      "dropTransport": true,
+      "note": "Simulate the tab refresh / network blip."
+    },
+    {
+      "reconnect": true
+    },
+    {
+      "recv": {
+        "jsonrpc": "2.0",
+        "id": "~capture:resumeId",
+        "method": "tesseron/resume",
+        "params": {
+          "sessionId": "s_conformance_0001",
+          "resumeToken": "rt_conformance_0001",
+          "protocolVersion": "~regex:^1\\.[0-9]+\\.[0-9]+$"
+        }
+      },
+      "note": "The host must present the token it stored from the welcome, not open a fresh hello."
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "~ref:resumeId",
+        "result": {
+          "sessionId": "s_conformance_0001",
+          "protocolVersion": "1.2.0",
+          "capabilities": {
+            "streaming": true,
+            "subscriptions": true,
+            "sampling": true,
+            "elicitation": true
+          },
+          "agent": {
+            "id": "agent_conformance",
+            "name": "conformance-runner"
+          },
+          "claimCode": "~absent",
+          "resumeToken": "rt_conformance_0002"
+        }
+      },
+      "note": "A successful resume never re-issues a claim code."
+    },
+    {
+      "dropTransport": true
+    },
+    {
+      "reconnect": true
+    },
+    {
+      "recv": {
+        "jsonrpc": "2.0",
+        "id": "~capture:resumeId2",
+        "method": "tesseron/resume",
+        "params": {
+          "resumeToken": "rt_conformance_0002"
+        }
+      },
+      "note": "Rotation is one-shot. A host that re-presents rt_conformance_0001 fails here."
+    }
+  ]
+}

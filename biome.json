@@ -7,8 +7,8 @@
       ".turbo",
       "examples",
       "**/.astro/**",
-      "plugin/server/**",
-      "assets/diagrams/**"
+      "assets/diagrams/**",
+      ".claude/**"
     ]
   },
   "formatter": {
