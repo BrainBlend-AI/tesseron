@@ -46,7 +46,7 @@ Sent by the app right after the WebSocket opens.
   "id": 1,
   "method": "tesseron/hello",
   "params": {
-    "protocolVersion": "1.1.0",
+    "protocolVersion": "1.2.0",
     "app": {
       "id": "shop",
       "name": "Acme Shop",
@@ -93,7 +93,7 @@ Rules:
   "id": 1,
   "result": {
     "sessionId": "s_a1b2c3de1234567",
-    "protocolVersion": "1.1.0",
+    "protocolVersion": "1.2.0",
     "capabilities": { "streaming": true, "subscriptions": true, "sampling": true, "elicitation": true },
     "agent": { "id": "pending", "name": "Awaiting agent" },
     "claimCode": "AB3X-7K"
@@ -152,9 +152,35 @@ Because in-band claim is just security theatre over localhost. Anything running 
 
 ## Multiple gateways on one machine
 
-A developer machine may have several Tesseron MCP gateways alive at once - typically one per running Claude Code session, sometimes more if a dev checkout's `plugin/server/index.cjs` is also loaded. The wire path is one of two flavours, picked at host build time and signalled in the instance manifest.
+A developer machine may have several Tesseron MCP gateways alive at once, typically one per running Claude Code session. The wire path is one of two flavours, picked by the host and signalled in the instance manifest.
 
-**Claim-mediated dial (default since `@tesseron/vite@2.2.0`, `@tesseron/mcp@2.4.0`).** The host (Vite plugin / `@tesseron/server`) mints the claim code, session id, and resume token at instance creation, writes them into the manifest's `hostMintedClaim` field, and sets `helloHandledByHost: true`. The gateway treats these as the signal "do not auto-dial." When the user pastes the code into one specific Claude session, that gateway scans every host-mint manifest for a matching `hostMintedClaim.code`, dials only the matching instance with the `Sec-WebSocket-Protocol: tesseron-gateway, tesseron-bind.<code>` upgrade header, and the host validates the bind in constant time before accepting. No race, no "switch to the right Claude" detour: the user's paste deterministically picks the gateway. See [tesseron#60](https://github.com/eigenwise/tesseron/issues/60).
+### Host-minted claims and the bind handshake
+
+Default since `@tesseron/vite@2.2.0` and `@tesseron/mcp@2.4.0`, and the reason the protocol went to `1.2.0`. See [tesseron#60](https://github.com/eigenwise/tesseron/issues/60).
+
+The host (Vite plugin, `@tesseron/server`) mints the claim code, session id, and resume token at instance creation, writes them into the manifest's `hostMintedClaim`, and sets `helloHandledByHost: true`. That flag means "do not auto-dial." The host answers its own app's `tesseron/hello` locally with a synthesized welcome, so the user sees a claim code without any gateway involved yet.
+
+When the user pastes the code into one specific Claude session, that gateway scans every host-mint manifest for a matching `hostMintedClaim.code` and dials only the matching instance, carrying the code in a bind step that the host validates in constant time before accepting. The user's paste deterministically picks the gateway, so there is no race and no "switch to the right Claude" detour.
+
+The bind step is per-binding, because a Unix socket has no upgrade handshake to carry a subprotocol:
+
+| Binding | Mechanism |
+|---|---|
+| [WebSocket](/protocol/transport-bindings/ws/#bind-subprotocol-host-minted-claims) | `Sec-WebSocket-Protocol: tesseron-gateway, tesseron-bind.<code>` on the upgrade |
+| [Unix domain socket](/protocol/transport-bindings/uds/#the-tesseronbind-handshake) | `tesseron/bind { code }` as the first NDJSON frame after connect |
+
+Either way the host validates before the session exists, and four rules hold for both:
+
+- **Constant-time comparison.** A short-circuiting compare leaks the code one character at a time to a process that can already reach the endpoint.
+- **Sliding TTL.** `expiresAt` is `mintedAt + 10 minutes`, refreshed every 5 minutes by rewriting the manifest. The heartbeat stops once the claim is spent. A gateway scanning for a code skips entries whose `expiresAt` has passed.
+- **Rate limit.** 5 mismatches within a 60-second rolling window trip a 60-second lockout. A successful bind resets the window.
+- **One shot.** `boundAgent` goes non-null on success and the claim is never re-bindable.
+
+After a successful bind the host replays the app's cached hello to the gateway and swallows the gateway's id-matched reply, so the app keeps the welcome it already resolved and never sees a second one.
+
+A gateway that dials a host-minted instance **without** binding is refused (`426 Upgrade Required` on WebSocket, `-32600 InvalidRequest` and a close on UDS). That gateway predates 1.2, and letting it through would deliver a second welcome against an already-resolved hello promise.
+
+Porting a host? The bind handshake is optional. Leave `helloHandledByHost` unset and the gateway auto-dials and mints the code for you, which is the simpler implementation and stays supported. Advertising the flag without implementing bind is the one combination that breaks. See [Port Tesseron to your language](/sdk/porting/).
 
 **Legacy auto-dial.** Gateways before 2.4.0 (and hosts before 2.2.0) take the original path: each gateway watches `~/.tesseron/instances/` and dials the bindings it discovers. The first gateway to upgrade a given browser instance owns the bridge for that session (the Vite plugin rejects subsequent upgrades with `HTTP 409`); the welcome+claim code returns through that one gateway.
 
@@ -185,7 +211,7 @@ The MCP gateway parses `protocolVersion` as `major.minor`:
 - **Exact match** → no logging.
 
 ```json
-{ "jsonrpc": "2.0", "id": 1, "error": { "code": -32000, "message": "Gateway speaks protocol 1.1.0; SDK sent 2.0.0. Major version mismatch - pin compatible package versions." } }
+{ "jsonrpc": "2.0", "id": 1, "error": { "code": -32000, "message": "Gateway speaks protocol 1.2.0; SDK sent 2.0.0. Major version mismatch - pin compatible package versions." } }
 ```
 
 Next: the [action model](/protocol/actions/).

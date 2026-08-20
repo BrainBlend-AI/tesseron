@@ -21,7 +21,7 @@ Tesseron speaks **JSON-RPC 2.0 over a reliable, ordered, duplex channel** betwee
 
 The channel is a **transport binding** - WebSocket by default, Unix domain socket as an opt-in for Node apps that don't need the browser bridge. The protocol is binding-neutral; see [Transport](/protocol/transport/) for the contract every binding satisfies.
 
-The protocol is at **version `1.1.0`**.
+The protocol is at **version `1.2.0`**.
 
 <Sequence
   caption="A first-use session, start to finish: from WebSocket open to the first tool-call result returned to the agent."
@@ -78,7 +78,7 @@ The protocol is at **version `1.1.0`**.
 
 | Name | Value |
 |---|---|
-| Protocol version | `1.1.0` |
+| Protocol version | `1.2.0` |
 | Discovery directory (v2) | `~/.tesseron/instances/` |
 | Discovery directory (v1, compat) | `~/.tesseron/tabs/` |
 | Manifest version | `2` |

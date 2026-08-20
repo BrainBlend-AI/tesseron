@@ -78,6 +78,7 @@ Tesseron's app ↔ MCP gateway hop is **JSON-RPC 2.0**, one JSON object per WebS
 | Method | Kind | Purpose |
 |---|---|---|
 | `tesseron/hello` | request | Register app, actions, resources, capabilities. First message. |
+| `tesseron/resume` | request | Rejoin a previously claimed session after a transport drop. Replaces hello on that path. See [Resume](/protocol/resume/). |
 | `actions/progress` | notification | Streaming update during an invocation. |
 | `actions/list_changed` | notification | App (re)registered / removed an action after hello. |
 | `resources/updated` | notification | Push a new value to a subscriber. |
@@ -97,8 +98,10 @@ Plus: the **response** for any `actions/invoke`, `resources/read`, `resources/su
 | `resources/read` | request | Agent requested current resource value. |
 | `resources/subscribe` | request | Agent subscribed to future updates. |
 | `resources/unsubscribe` | request | Agent unsubscribed. |
+| `tesseron/claimed` | notification | The pending claim code was consumed; carries the bound agent's identity. |
+| `tesseron/bind` | request | Host-minted instances only, and only over UDS. Presents the claim code before the session exists. See [the bind handshake](/protocol/handshake/#host-minted-claims-and-the-bind-handshake). |
 
-And the **response** to the `tesseron/hello` you sent.
+And the **response** to the `tesseron/hello` or `tesseron/resume` you sent.
 
 ## ID correlation
 
@@ -116,6 +119,6 @@ And the **response** to the `tesseron/hello` you sent.
 
 ## Versioning
 
-`tesseron/hello` includes `protocolVersion: "1.1.0"`. The gateway parses it as `major.minor`: a major mismatch is rejected with `-32000 ProtocolMismatch` and the channel is closed, a minor mismatch is accepted with a stderr warning (newer fields may be silently dropped), an exact match is silent. See [Handshake](/protocol/handshake/#protocol-version-mismatch).
+`tesseron/hello` includes `protocolVersion: "1.2.0"`. The gateway parses it as `major.minor`: a major mismatch is rejected with `-32000 ProtocolMismatch` and the channel is closed, a minor mismatch is accepted with a stderr warning (newer fields may be silently dropped), an exact match is silent. See [Handshake](/protocol/handshake/#protocol-version-mismatch).
 
 Next: how that WebSocket gets established - [Transport](/protocol/transport/).

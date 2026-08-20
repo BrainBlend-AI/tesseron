@@ -120,12 +120,31 @@ Each `on(...)` handler maps to the corresponding builder. Implement progress / s
 
 Before you ship, make sure the SDK passes every line of this list. An SDK that fails any line is not Tesseron-compliant.
 
+Part of this list is executable. [`conformance/`](https://github.com/eigenwise/tesseron/tree/main/conformance) in the Tesseron repo holds the same assertions as scripted JSON exchanges, so "does my port handle cancellation correctly" is a command instead of a careful re-read. The fixtures are plain JSON with no dependency on this workspace: vendor the directory, write a ~200-line runner that plays the gateway side, and walk the steps. The format and the runner contract are in [`conformance/README.md`](https://github.com/eigenwise/tesseron/blob/main/conformance/README.md). It is a starter set covering the handshake, action lifecycle, resources, and error model; the prose list below is still the wider contract.
+
 **Handshake**
 - [ ] Sends `tesseron/hello` immediately after the binding's connection becomes ready.
-- [ ] Sends `protocolVersion = "1.1.0"` exactly.
+- [ ] Sends `protocolVersion = "1.2.0"`. The gateway compares `major.minor`: a major mismatch is rejected with `-32000`, a minor mismatch is accepted with a warning.
 - [ ] Sends `app.id` that matches `/^[a-z][a-z0-9_]*$/`.
 - [ ] Surfaces `welcome.claimCode` to the caller (stdout, event, return value - your choice).
 - [ ] Surfaces `welcome.capabilities` as the authoritative agent capability set to handlers.
+
+**Claim minting** — pick one of the two flows. Gateway-minted is the simpler port and stays supported.
+
+*Gateway-minted (default).* Omit `helloHandledByHost` from the manifest. The gateway auto-dials, mints the code, and returns it in the welcome. Nothing extra to implement.
+
+- [ ] Manifest omits `helloHandledByHost` (or sets it `false`) and carries no `hostMintedClaim`.
+
+*Host-minted (opt-in, [tesseron#60](https://github.com/eigenwise/tesseron/issues/60)).* The host mints the code so the user's paste deterministically picks one agent session instead of racing. Adds the [bind handshake](/protocol/handshake/#host-minted-claims-and-the-bind-handshake) as a hard requirement.
+
+- [ ] Mints `code`, `sessionId`, and `resumeToken` at instance creation; writes them into `hostMintedClaim` and sets `helloHandledByHost: true`.
+- [ ] Answers the app's own `tesseron/hello` locally with a synthesized welcome; does not forward it until a gateway binds.
+- [ ] Sets `hostMintedClaim.expiresAt = mintedAt + 10 min` and refreshes both every 5 min by rewriting the manifest, stopping once `boundAgent` is non-null.
+- [ ] Validates the bind code in **constant time**. A short-circuiting string compare leaks the code one character at a time.
+- [ ] Rate-limits mismatches: 5 within a 60 s rolling window trips a 60 s lockout; a successful bind resets the window.
+- [ ] Accepts exactly one bind. A second attempt against a spent claim is rejected, never re-bound.
+- [ ] Rejects a dial that skips the bind step (a pre-1.2 gateway). Letting it through produces a second, conflicting welcome against an already-resolved hello.
+- [ ] Replays the cached hello to the gateway after a successful bind, and drops the gateway's id-matched reply so the app never sees two welcomes.
 
 **Actions**
 - [ ] Validates action input against the Standard-Schema-equivalent schema before the handler runs.

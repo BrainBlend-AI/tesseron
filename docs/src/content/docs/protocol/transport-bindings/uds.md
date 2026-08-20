@@ -35,7 +35,42 @@ NDJSON: one JSON-RPC envelope per **`\n`-terminated line**.
 - Buffer inbound bytes and split on `\n` on receive. Empty lines are ignored.
 - No batching, no fragmentation, no compression.
 
-There is **no** subprotocol negotiation - bytes start flowing the moment `connect()` succeeds. The gateway sends `tesseron/hello` (or `tesseron/resume`) as its first message and the app responds.
+There is **no** subprotocol negotiation - a socket has no upgrade handshake to carry one. Bytes start flowing the moment `connect()` succeeds, and the app sends `tesseron/hello` (or `tesseron/resume`) as its first message.
+
+Host-minted instances are the exception: there the gateway sends [`tesseron/bind`](#the-tesseronbind-handshake) first and the app's hello is held back until the bind succeeds.
+
+## The `tesseron/bind` handshake
+
+The WebSocket binding carries a host-minted claim code in a `tesseron-bind.<code>` subprotocol element. A Unix socket has no upgrade to hang that on, so the same gate is a JSON-RPC request instead: the gateway sends `tesseron/bind` as the **first NDJSON frame after connect**, before any other traffic.
+
+```json
+{ "jsonrpc": "2.0", "id": "__tesseron-bind-<uuid>", "method": "tesseron/bind", "params": { "code": "7Q4K-M2" } }
+```
+
+The host upper-cases the incoming code, compares it against `hostMintedClaim.code` in constant time, and answers:
+
+```json
+{ "jsonrpc": "2.0", "id": "__tesseron-bind-<uuid>", "result": { "ok": true } }
+```
+
+Failures answer with an error and, where noted, close the socket:
+
+| Condition | Code | Socket |
+|---|---|---|
+| Host is in bind lockout | `-32009 Unauthorized` | Closed |
+| Code does not match | `-32009 Unauthorized` | Closed |
+| Already bound | `-32009 Unauthorized` | Kept |
+| Claim already spent (`boundAgent !== null`) | `-32009 Unauthorized` | Kept |
+| `params.code` missing or not a string | `-32602 InvalidParams` | Kept |
+| Any non-bind frame arrives first | `-32600 InvalidRequest` | Closed |
+
+That last row is the UDS counterpart to the WebSocket binding's `426 Upgrade Required`. A host that minted its own claim has already answered the app's hello with a synthesized welcome, so a gateway that starts talking without binding would produce a second, conflicting welcome. The host closes instead.
+
+Mismatches are rate-limited: 5 within a 60-second rolling window trip a 60-second lockout; a successful bind resets the window.
+
+After acking, the host replays the app's cached hello to the gateway and drops the gateway's id-matched reply, so the app never sees the second welcome. Queued non-hello frames drain afterwards.
+
+Hosts that leave `helloHandledByHost` unset never take this path: the gateway auto-dials and mints the code itself, and the first frame on the wire is the app's hello.
 
 ## Origin / access control
 
@@ -83,5 +118,7 @@ Implement a UDS server that:
 4. Accepts exactly one connection; rejects subsequent connect attempts.
 5. Serialises outgoing JSON-RPC envelopes with `\n` terminator; splits incoming bytes on `\n`.
 6. Deletes its manifest, the socket file, and the temp dir on close.
+
+If you also mint claims host-side, implement [`tesseron/bind`](#the-tesseronbind-handshake) with constant-time comparison, the rate limit, and the close-on-unbound-frame rule. Skipping it while advertising `helloHandledByHost: true` leaves the app unreachable.
 
 The full conformance checklist lives in [Port Tesseron to your language](/sdk/porting/).

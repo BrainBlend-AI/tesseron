@@ -41,6 +41,33 @@ The gateway sends `Sec-WebSocket-Protocol: tesseron-gateway` on its upgrade requ
 
 The Vite plugin is the documented exception: it accepts plain (no-subprotocol) connections from the browser tab AND a separate `tesseron-gateway` connection from the gateway, and bridges them.
 
+## Bind subprotocol (host-minted claims)
+
+When the app minted its own claim code (`helloHandledByHost: true` in the manifest — see [Host-minted claims](/protocol/handshake/#host-minted-claims-and-the-bind-handshake)), the gateway carries a second subprotocol element on the upgrade:
+
+```http
+Sec-WebSocket-Protocol: tesseron-gateway, tesseron-bind.7Q4K-M2
+```
+
+The code element is `tesseron-bind.` followed by the claim code, which must match `[A-Za-z0-9_-]{1,64}`. A request carrying **more than one** `tesseron-bind.` element is rejected outright: two codes in one header is a header-injection signal, not an ambiguity to resolve.
+
+The host compares the code against its in-memory `hostMintedClaim.code` in constant time and answers on the upgrade, before any WebSocket frame is exchanged:
+
+| Condition | Response | Notes |
+|---|---|---|
+| No `tesseron-gateway` element | Socket destroyed, no HTTP response | Not a Tesseron dial. |
+| Host is in bind lockout | `429 Too Many Requests` | Distinguishable from a mismatch on purpose. |
+| Code does not match | `403 Forbidden` | Counts toward the rate limit. |
+| Claim already spent (`boundAgent !== null`) | `409 Conflict` | One-shot. Mint a fresh session. |
+| A valid bind is already in flight | `409 Conflict` | Closes the concurrent-bind race before `handleUpgrade` attaches. |
+| Malformed `tesseron-bind.` element | `400 Bad Request` | Body names the grammar violation. |
+| No bind element at all | `426 Upgrade Required` | A pre-1.2 gateway. See below. |
+| Valid bind, host already attached | Socket destroyed | Duplicate. |
+
+Only the `426` deserves explanation. A host that minted its own claim has **already** answered the app's `tesseron/hello` with a synthesized welcome. A gateway that auto-dials without binding would produce a second welcome against a hello promise that has already resolved, so the host refuses the upgrade instead of corrupting the session. Hosts that do not set `helloHandledByHost` never reach this path and keep accepting plain `tesseron-gateway` dials.
+
+Mismatches are rate-limited: 5 within a 60-second rolling window trip a 60-second lockout, and a successful bind resets the window.
+
 ## Origin enforcement
 
 WS upgrades carry an `Origin` header. The gateway treats whatever the upgrade request advertised as the authoritative origin for the lifetime of the session. SDK-declared `app.origin` values that disagree are overwritten with the upgrade-time value at `tesseron/hello` and `tesseron/resume`.
@@ -75,5 +102,7 @@ Implement a WS server that:
 3. Accepts exactly one upgrade carrying the `tesseron-gateway` subprotocol; rejects every other upgrade.
 4. Serialises outgoing JSON-RPC envelopes as text frames; parses incoming text frames.
 5. Deletes its manifest on close.
+
+If you also mint claims host-side, implement the [bind subprotocol](#bind-subprotocol-host-minted-claims) with all eight upgrade outcomes above, constant-time code comparison, and the rate limit. Skipping it while advertising `helloHandledByHost: true` leaves the app unreachable.
 
 The full conformance checklist lives in [Port Tesseron to your language](/sdk/porting/).

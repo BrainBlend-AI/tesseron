@@ -108,15 +108,21 @@ Codes are six alphanumeric characters minus confusables (no `0`, `1`, `I`, `L`, 
 
 Each minted code also drops a breadcrumb at `~/.tesseron/claims/<CODE>.json` so a sibling gateway (a parallel Claude Code session, a leftover dev gateway) that receives `tesseron__claim_session` for a code it doesn't own locally can surface a "claim code belongs to gateway pid N" error instead of a flat "no pending session". The breadcrumb is removed on successful claim, on unclaimed close, and on `gateway.stop()`. Embedders building their own claim UI can call `gateway.describeForeignClaim(code)` to drive the same behaviour. See the [handshake page](/protocol/handshake/#multiple-gateways-on-one-machine) for the full picture.
 
-## Where the plugin bundles it
+## How the plugin gets it
 
-The Claude Code plugin at `plugin/` in the Tesseron repo bundles the gateway as `plugin/server/index.cjs`, built via:
+The Claude Code plugin at `plugin/` in the Tesseron repo ships no bundled gateway. `plugin/.mcp.json` fetches the published package instead, pinned to the plugin's own version:
 
-```bash
-pnpm --filter @tesseron/mcp build:plugin
+```json
+{
+  "mcpServers": {
+    "tesseron": { "type": "stdio", "command": "npx", "args": ["-y", "@tesseron/mcp@2.10.1"] }
+  }
+}
 ```
 
-This esbuild bundle is what ships to plugin installers. If you're hacking on the gateway, rebuild the plugin bundle before testing against Claude Code.
+That pin is one of eight surfaces carrying the plugin version, all owned by `scripts/sync-plugin-version.mjs`. Run `pnpm sync-plugin-version` to fix drift; CI runs `--check`.
+
+If you're hacking on the gateway, point the plugin at your checkout rather than editing the pin.
 
 ## Extending it
 
