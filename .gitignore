@@ -58,4 +58,5 @@ yarn-error.log*
 # Project-specific internals (not for public consumption)
 /outputs/
 /MERGE_LOG.md
+/repo-cleanup/
 /PLAN.md
