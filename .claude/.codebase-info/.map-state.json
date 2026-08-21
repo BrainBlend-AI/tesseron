@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "tool": "codebase-mapper",
   "version": "2.15.5",
-  "mappedAt": "2026-08-20",
-  "gitCommit": "7584e5d71dc019fed31185594a64f641a15193fe",
+  "mappedAt": "2026-08-21",
+  "gitCommit": "e878e21d481df5c2325b84e08f55100883912a7f",
   "documents": [
     "architecture.md",
     "coding-style.md",
@@ -19,18 +19,18 @@
     "testing.md"
   ],
   "hashes": {
-    "INDEX.md": "b58ec0473babf8e0b480c0903e7ad13fc08688338603c6d2c7bed478bae74895",
+    "INDEX.md": "f73769c4f344f86608864ea6f45e22b3290bd663903258a3c1254517dd37a207",
     "architecture.md": "f9228d7344b6bc870ac7c8a60e923b5183197420d86eca8b14d1a2601dda0b40",
     "coding-style.md": "80e613764b28c9521a32ff93c16210d25e71cb02e0691bd2145bf9531a16fad7",
-    "directory-structure.md": "3164cf5b4e34c5acd265f9d5b2cf2404eeded221ccfcbd1144a0bd07c16f917b",
+    "directory-structure.md": "d4f5b60b2f68924581bfb45c60288f8c9f44813d21cea09500da79d5a4c17e4a",
     "entry-points.md": "c2ffadb9f0ea755c8e38e0469b08e9601c8537a6bc357da972c8c36566808d79",
     "gateway.md": "7b64b88b4f6b56ad1fd874af2503c3dbc9f2f2df2bb914b8b57b55126ee572c4",
-    "modules.md": "aa1d9d0bd78d44d85181e9212f587e03ed0e0ccb4250d7ef52865ab89ca9e7b2",
-    "onboarding.md": "6bcf30df2d767e13ee70d3e5100a954acbf290a12de8769af4a7ec2f7a070d9e",
+    "modules.md": "f45b1a43f252c5950f8e9e40bcb8cb4aefcdab2a8df7f229ac730b35355e20a5",
+    "onboarding.md": "64eab2293e18b8e2dd08e845540c2965746e63bf97f50b84cb900d95aaa46538",
     "patterns.md": "d531a5b0418448e37645996fcb2f3a4c7acbeb9768481bb36f87f0ea38dd70dc",
     "protocol.md": "83b201ee555a9d6ab7288a1bc220fa70e4b0def4939cf9a7f309773f41ce5dff",
-    "release-and-plugin.md": "a9f8d3eaafa828ae3dfcb7c8a0399aaa144820d1648804042425b5b235560515",
-    "tech-landscape.md": "181ced7106488ffe34dd516f9210feb01adb7189bd14bebb9261cf307d568e87",
+    "release-and-plugin.md": "4466c56270831b93730be148ef6e299d0f71e3c3851cfec7c94616e1339a98db",
+    "tech-landscape.md": "9b64e0cc8adf737bd11d9c9148854a4c1ac6576dc528a3dd65701bf4c55798cd",
     "testing.md": "398594a082777df68619375fe5734a9a7ac81e3f00cbae68ddc2ed61fb0224ae"
   }
 }

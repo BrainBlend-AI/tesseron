@@ -1,10 +1,11 @@
 # Tesseron codebase map
 
-*Last Updated: 2026-08-20*
+*Last Updated: 2026-08-21*
 
 Tesseron exposes typed app actions to MCP-compatible AI agents over WebSocket. No browser
-automation, no scraping. pnpm + turbo monorepo: 9 published packages (all 2.10.1, one changesets
-`fixed` group), a Starlight docs site, 6 example apps, and a version-coupled Claude Code plugin.
+automation, no scraping. pnpm + turbo monorepo: 9 published packages at 2.10.1 (eight in one
+changesets `fixed` group, docs-mcp released separately), a Starlight docs site, 6 example apps, a
+language-neutral conformance corpus, and a version-coupled Claude Code plugin.
 
 **The one thing to know:** the app listens and the gateway dials *out* to it. `@tesseron/mcp` has no
 port and no `start()`; it watches `~/.tesseron/instances/` for manifests the app wrote.
@@ -21,7 +22,7 @@ port and no `start()`; it watches `~/.tesseron/instances/` for manifests the app
 | [coding-style.md](coding-style.md) | Biome config and the conventions the code actually follows |
 | [patterns.md](patterns.md) | reconnection guards, error propagation, security posture |
 | [testing.md](testing.md) | what `pnpm test` covers, the three packages it skips, the conformance corpus |
-| [release-and-plugin.md](release-and-plugin.md) | the 9-package fixed group and the 8-surface version contract |
+| [release-and-plugin.md](release-and-plugin.md) | the 8-package fixed group and the 8-surface version contract |
 | [onboarding.md](onboarding.md) | setup, the loop, common tasks, traps |
 
 Conventions live in [`AGENTS.md`](../../AGENTS.md) at the repo root. This map describes the code;

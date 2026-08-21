@@ -1,20 +1,26 @@
 #!/usr/bin/env node
 /**
- * Sync the Claude Code plugin manifest versions to `@tesseron/mcp`'s version.
+ * Sync the Claude Code plugin manifest versions to the packages they pin.
  *
- * The plugin's bundled gateway IS `@tesseron/mcp`; the two should never
- * disagree. This script is the contract that keeps them in lockstep, run as
- * part of `pnpm version-packages` so changesets-driven bumps automatically
- * carry through to the manifest.
+ * The plugin's gateway IS `@tesseron/mcp`; the two should never disagree. This
+ * script is the contract that keeps them in lockstep, run as part of
+ * `pnpm version-packages` so changesets-driven bumps automatically carry
+ * through to the manifest.
+ *
+ * Two versions, not one. `@tesseron/mcp` is in the changesets `fixed` group and
+ * defines the *plugin* version. `@tesseron/docs-mcp` left that group because it
+ * ships prose rather than protocol code, so a docs correction no longer forces
+ * a bump across every SDK package. It therefore carries its own version, and
+ * only the surfaces that literally name it follow it.
  *
  * Eight surfaces move together:
- *   - plugin/.claude-plugin/plugin.json#version  (the plugin's own manifest)
- *   - .claude-plugin/marketplace.json#metadata.version  (Claude marketplace version)
- *   - .claude-plugin/marketplace.json#plugins[0].version  (Claude marketplace listing)
- *   - .agents/plugins/marketplace.json#plugins[0].version  (Codex marketplace listing)
- *   - plugin/.mcp.json#mcpServers.tesseron.args  (npx -y @tesseron/mcp@<version>)
- *   - plugin/.mcp.json#mcpServers.tesseron-docs.args  (npx -y @tesseron/docs-mcp@<version>)
- *   - README.md  (every literal `@tesseron/{mcp,docs-mcp}@<semver>` in install snippets)
+ *   - plugin/.claude-plugin/plugin.json#version           → @tesseron/mcp
+ *   - .claude-plugin/marketplace.json#metadata.version    → @tesseron/mcp
+ *   - .claude-plugin/marketplace.json#plugins[0].version  → @tesseron/mcp
+ *   - .agents/plugins/marketplace.json#plugins[0].version → @tesseron/mcp
+ *   - plugin/.mcp.json#mcpServers.tesseron.args           → @tesseron/mcp
+ *   - plugin/.mcp.json#mcpServers.tesseron-docs.args      → @tesseron/docs-mcp
+ *   - README.md  (every literal `@tesseron/{mcp,docs-mcp}@<semver>`, each to its own package)
  *   - plugin/README.md  (same)
  *
  * Bumping only one leaves the other surfaces stale and users running an older
@@ -31,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MCP_PKG = resolve(repoRoot, 'packages/mcp/package.json');
+const DOCS_MCP_PKG = resolve(repoRoot, 'packages/docs-mcp/package.json');
 const PLUGIN_MANIFEST = resolve(repoRoot, 'plugin/.claude-plugin/plugin.json');
 const MARKETPLACE_MANIFEST = resolve(repoRoot, '.claude-plugin/marketplace.json');
 const CODEX_MARKETPLACE_MANIFEST = resolve(repoRoot, '.agents/plugins/marketplace.json');
@@ -39,9 +46,9 @@ const PLUGIN_MCP_JSON = resolve(repoRoot, 'plugin/.mcp.json');
 // strings. These are not JSON, so the script rewrites them as text via regex.
 const README_TARGETS = [resolve(repoRoot, 'README.md'), resolve(repoRoot, 'plugin/README.md')];
 
-// `<bin-package>@<version>` arg slots in plugin/.mcp.json. The script pins both
-// MCP servers to the same version as @tesseron/mcp so users always run a
-// gateway that matches the plugin manifest they installed.
+// `<bin-package>@<version>` arg slots in plugin/.mcp.json. Each server pins the
+// package it actually runs, so the gateway follows the plugin version while the
+// docs server follows its own.
 const MCP_NPX_TARGETS = [
   { server: 'tesseron', pkg: '@tesseron/mcp' },
   { server: 'tesseron-docs', pkg: '@tesseron/docs-mcp' },
@@ -76,12 +83,26 @@ function serialize(data) {
   return `${JSON.stringify(data, null, 2)}\n`;
 }
 
-const { data: mcpPkg } = await readJson(MCP_PKG);
-const target = mcpPkg.version;
-if (typeof target !== 'string' || target.length === 0) {
-  console.error(`[sync-plugin-version] could not read version from ${MCP_PKG}`);
-  process.exit(2);
+async function readPackageVersion(path) {
+  const { data } = await readJson(path);
+  if (typeof data.version !== 'string' || data.version.length === 0) {
+    console.error(`[sync-plugin-version] could not read version from ${path}`);
+    process.exit(2);
+  }
+  return data.version;
 }
+
+/** The plugin's own version: the gateway and the plugin manifest are one artifact. */
+const target = await readPackageVersion(MCP_PKG);
+
+/**
+ * Version each pinned package resolves to. `@tesseron/docs-mcp` releases on its
+ * own cadence, so surfaces that name it must not inherit the plugin version.
+ */
+const versionByPackage = {
+  '@tesseron/mcp': target,
+  '@tesseron/docs-mcp': await readPackageVersion(DOCS_MCP_PKG),
+};
 
 const drift = [];
 
@@ -188,7 +209,7 @@ const drift = [];
       process.exit(2);
     }
     const current = entry.args[idx];
-    const wanted = `${pkg}@${target}`;
+    const wanted = `${pkg}@${versionByPackage[pkg]}`;
     if (current !== wanted) {
       mutated = true;
       driftedTargets.push(`mcpServers.${server} (${current} → ${wanted})`);
@@ -201,7 +222,6 @@ const drift = [];
     drift.push({
       file: PLUGIN_MCP_JSON,
       from: driftedTargets.join(', '),
-      to: target,
       next: serialize(next),
       currentRaw: raw,
     });
@@ -209,9 +229,9 @@ const drift = [];
 }
 
 // 7 + 8. README install snippets — match every literal
-// `@tesseron/{mcp,docs-mcp}@<semver>` and rewrite. The placeholder
-// `@tesseron/mcp@<version>` (with literal `<version>` text) is intentionally
-// not matched because the regex requires digits.
+// `@tesseron/{mcp,docs-mcp}@<semver>` and rewrite each to *its own* package's
+// version. The placeholder `@tesseron/mcp@<version>` (with literal `<version>`
+// text) is intentionally not matched because the regex requires digits.
 const README_PIN_PATTERN = /@tesseron\/(mcp|docs-mcp)@(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)/g;
 for (const file of README_TARGETS) {
   let raw;
@@ -223,32 +243,38 @@ for (const file of README_TARGETS) {
   }
   const driftedPins = [];
   const next = raw.replace(README_PIN_PATTERN, (match, pkg, current) => {
-    const wanted = `@tesseron/${pkg}@${target}`;
-    if (current !== target) driftedPins.push(`${match} → ${wanted}`);
+    const wanted = `@tesseron/${pkg}@${versionByPackage[`@tesseron/${pkg}`]}`;
+    if (match !== wanted) driftedPins.push(`${match} → ${wanted}`);
     return wanted;
   });
   if (driftedPins.length > 0) {
     drift.push({
       file,
       from: driftedPins.length === 1 ? driftedPins[0] : `${driftedPins.length} pin(s) drifted`,
-      to: target,
       next,
       currentRaw: raw,
     });
   }
 }
 
+/** `from` already spells out "old → new" for the per-package surfaces. */
+const describe = (d) => (d.to === undefined ? d.from : `${d.from} → ${d.to}`);
+
+const versionSummary = Object.entries(versionByPackage)
+  .map(([pkg, version]) => `${pkg} = ${version}`)
+  .join(', ');
+
 if (drift.length === 0) {
   // Log on both paths: in check mode the green check is the only signal CI
   // emits, and a positive confirmation makes the guard's success auditable.
-  console.log(`[sync-plugin-version] all manifests already at ${target}, nothing to do.`);
+  console.log(`[sync-plugin-version] all manifests already in sync (${versionSummary}).`);
   process.exit(0);
 }
 
 if (checkMode) {
-  console.error(`[sync-plugin-version] drift detected (target: @tesseron/mcp = ${target}):`);
+  console.error(`[sync-plugin-version] drift detected (${versionSummary}):`);
   for (const d of drift) {
-    console.error(`  - ${d.file}: ${d.from} → ${d.to}`);
+    console.error(`  - ${d.file}: ${describe(d)}`);
   }
   console.error('Run `pnpm sync-plugin-version` to fix, then commit the changes.');
   process.exit(1);
@@ -256,5 +282,5 @@ if (checkMode) {
 
 for (const d of drift) {
   await writeFile(d.file, d.next);
-  console.log(`[sync-plugin-version] ${d.file}: ${d.from} → ${d.to}`);
+  console.log(`[sync-plugin-version] ${d.file}: ${describe(d)}`);
 }

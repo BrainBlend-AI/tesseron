@@ -1,6 +1,6 @@
 # Tech landscape
 
-*Last Updated: 2026-08-20*
+*Last Updated: 2026-08-21*
 
 | Concern | Choice | Source of truth |
 |---|---|---|
@@ -64,7 +64,9 @@ Three workflows in `.github/workflows/`:
   the fixture corpus that out-of-repo SDK ports consume; see [testing.md](testing.md).
 - **`docs.yml`** — push to main, manual, plus a weekly cron `0 6 * * 1`. Builds Starlight, deploys to
   GitHub Pages.
-- **`release.yml`** — push to main and manual. Upgrades to `npm@latest` because Node 20's npm 10
+- **`release.yml`** — push to main and manual. Upgrades to **`npm@^11.5.1`** because Node 20's npm 10
   cannot do trusted-publish OIDC (`:38`), builds `@tesseron/*` excluding docs, re-runs typecheck and
-  test, then `changesets/action@v1`. Publishes via **npm trusted publishing / OIDC** —
+  test, then `changesets/action@v1`. The pin is deliberate: this step said `npm@latest` until
+  2026-08-21, and once npm 12 dropped Node 20 (`engines: ^22.22.2 || ^24.15.0 || >=26.0.0`) every
+  release died at EBADENGINE. It failed silently from 2026-06-10 because nothing tried to release. Publishes via **npm trusted publishing / OIDC** —
   `NODE_AUTH_TOKEN` is deliberately unset and `NPM_CONFIG_PROVENANCE: "true"` (`:68`).

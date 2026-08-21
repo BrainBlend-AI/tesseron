@@ -40,18 +40,22 @@ repo; do not introduce one.
 ## Plugin manifest is version-coupled
 
 The plugin no longer ships a pre-bundled gateway. `plugin/.mcp.json` invokes
-`@tesseron/mcp` and `@tesseron/docs-mcp` via `npx -y <pkg>@<version>`, with the
-version pinned to the plugin's own. Eight surfaces move together on every
-release:
+`@tesseron/mcp` and `@tesseron/docs-mcp` via `npx -y <pkg>@<version>`. Eight
+surfaces move on every release, but they no longer all carry the *same* number:
+the plugin's own version tracks `@tesseron/mcp`, while the two surfaces that
+literally name `@tesseron/docs-mcp` track that package, which releases
+independently.
 
-- `plugin/.claude-plugin/plugin.json#version`
-- `.claude-plugin/marketplace.json#metadata.version` (Claude marketplace)
-- `.claude-plugin/marketplace.json#plugins[0].version` (Claude marketplace)
-- `.agents/plugins/marketplace.json#plugins[0].version` (Codex marketplace)
-- `plugin/.mcp.json#mcpServers.tesseron.args`
-- `plugin/.mcp.json#mcpServers.tesseron-docs.args`
-- `README.md` (every literal `@tesseron/{mcp,docs-mcp}@<semver>` in install snippets)
-- `plugin/README.md` (same)
+| Surface | Follows |
+|---|---|
+| `plugin/.claude-plugin/plugin.json#version` | `@tesseron/mcp` |
+| `.claude-plugin/marketplace.json#metadata.version` (Claude marketplace) | `@tesseron/mcp` |
+| `.claude-plugin/marketplace.json#plugins[0].version` (Claude marketplace) | `@tesseron/mcp` |
+| `.agents/plugins/marketplace.json#plugins[0].version` (Codex marketplace) | `@tesseron/mcp` |
+| `plugin/.mcp.json#mcpServers.tesseron.args` | `@tesseron/mcp` |
+| `plugin/.mcp.json#mcpServers.tesseron-docs.args` | `@tesseron/docs-mcp` |
+| `README.md` (every literal `@tesseron/{mcp,docs-mcp}@<semver>`) | each pin's own package |
+| `plugin/README.md` (same) | each pin's own package |
 
 `scripts/sync-plugin-version.mjs` is the contract. Run `pnpm sync-plugin-version`
 to fix drift, or `pnpm sync-plugin-version --check` (CI does this) to fail fast.
@@ -69,10 +73,16 @@ under `packages/`:
 pnpm changeset
 ```
 
-`@tesseron/core`, `/mcp`, `/docs-mcp`, `/web`, `/server`, `/react`, `/svelte`,
-`/vue`, `/vite` ship in lockstep — bump them together. The release workflow at
-`.github/workflows/release.yml` opens a PR or publishes via
-`changesets/action@v1`.
+`@tesseron/core`, `/mcp`, `/web`, `/server`, `/react`, `/svelte`, `/vue`,
+`/vite` ship in lockstep — bump them together. They are one `fixed` group in
+`.changeset/config.json`.
+
+`@tesseron/docs-mcp` is **not** in that group. It ships the docs snapshot rather
+than protocol code, so a prose correction releases on its own instead of forcing
+a bump across every SDK package. Give it its own changeset.
+
+The release workflow at `.github/workflows/release.yml` opens a PR or publishes
+via `changesets/action@v1`.
 
 ## Documentation
 

@@ -1,6 +1,6 @@
 # Onboarding
 
-*Last Updated: 2026-08-20*
+*Last Updated: 2026-08-21*
 
 ## Setup
 
@@ -58,8 +58,8 @@ adapter to lifecycle binding only, around 120 lines. Copy the shape of
 `scripts/sync-plugin-version.mjs` owns all of them. Run `pnpm sync-plugin-version`. See
 [release-and-plugin.md](release-and-plugin.md).
 
-**Ship a change.** `pnpm changeset`. All nine packages bump together. Never hand-edit a version
-field.
+**Ship a change.** `pnpm changeset`. The eight SDK packages bump together; a `@tesseron/docs-mcp`
+changeset bumps only that one. Never hand-edit a version field.
 
 ## Traps that cost people time
 

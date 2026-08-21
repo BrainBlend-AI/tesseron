@@ -48,9 +48,10 @@ It's already in context, so don't re-derive the layout with Glob and Grep before
 Three, in `.claude/live-rules/rules/`, injected by scope rather than always:
 
 - `plugin-version-lockstep.md` fires on `plugin/**`, the two marketplace manifests, and `README.md`.
-  Eight surfaces carry the plugin version; `scripts/sync-plugin-version.mjs` owns all of them.
-- `release-lockstep.md` fires on `packages/*/package.json` and `.changeset/**`. Nine packages are a
-  changesets `fixed` group and bump as one.
+  Eight surfaces carry a version and they follow two different packages;
+  `scripts/sync-plugin-version.mjs` owns all of them.
+- `release-lockstep.md` fires on `packages/*/package.json` and `.changeset/**`. Eight packages are a
+  changesets `fixed` group and bump as one; `@tesseron/docs-mcp` sits outside it on purpose.
 - `self-improvement.md` is global.
 
 Rules restating pnpm-only, DCO sign-off, or docs-sync would duplicate `AGENTS.md` (always in

@@ -1,9 +1,9 @@
 # Modules
 
-*Last Updated: 2026-08-20*
+*Last Updated: 2026-08-21*
 
-Nine published packages, all at **2.10.1**, all in one changesets `fixed` group. See
-[release-and-plugin.md](release-and-plugin.md) for why they move together.
+Nine published packages, all at **2.10.1**. Eight are in one changesets `fixed` group;
+`@tesseron/docs-mcp` releases on its own. See [release-and-plugin.md](release-and-plugin.md).
 
 Every package points `types` at `./src/index.ts` for workspace resolution and swaps to
 `./dist/index.d.ts` via `publishConfig` on publish (e.g. `packages/web/package.json:34` vs `:62`).

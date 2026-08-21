@@ -1,6 +1,6 @@
 # Directory structure
 
-*Last Updated: 2026-08-20*
+*Last Updated: 2026-08-21*
 
 Monorepo, organized by published artifact. 110 tracked source files, ~17k LOC under `packages/`.
 
@@ -39,7 +39,7 @@ tesseron/
 ├── .claude-plugin/           Claude Code marketplace listing
 ├── .agents/plugins/          Codex marketplace listing, same plugin source
 ├── scripts/sync-plugin-version.mjs   owns all 8 version surfaces
-├── .changeset/               config.json holds the 9-package fixed group
+├── .changeset/               config.json holds the 8-package fixed group (docs-mcp is out)
 ├── .github/workflows/        ci.yml, docs.yml, release.yml
 ├── AGENTS.md                 the real conventions. CLAUDE.md just @-includes it.
 ├── turbo.json  biome.json  tsconfig.base.json  pnpm-workspace.yaml
