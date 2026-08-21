@@ -1,5 +1,12 @@
 # @tesseron/server
 
+## 2.10.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @tesseron/core@2.10.2
+
 ## 2.10.1
 
 ### Patch Changes

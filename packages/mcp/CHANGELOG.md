@@ -1,5 +1,15 @@
 # @tesseron/mcp
 
+## 2.10.2
+
+### Patch Changes
+
+- [`2202dfc`](https://github.com/Eigenwise/tesseron/commit/2202dfc2581a119440485475605c137df62ff25b) by @Eigenwise - Move `@tesseron/server` from `dependencies` to `devDependencies`. The gateway's
+  `src/` never imports it (only the tests do), so it was pulling an extra package
+  into every consumer's install tree for nothing.
+- Updated dependencies []:
+  - @tesseron/core@2.10.2
+
 ## 2.10.1
 
 ### Patch Changes
